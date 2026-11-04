@@ -146,5 +146,9 @@ public struct ResearchLibraryIntentPackage: AppIntentsPackage {}
 @available(macOS 15.0, iOS 18.0, *)
 extension LibraryItemEntity: IndexedEntity {}
 
+// SyncableEntity ships with the macOS/iOS 27 SDKs (Swift 6.4 / Xcode 27).
+// Guarded so the package still builds on CI runners with older Xcode.
+#if compiler(>=6.4)
 @available(macOS 27.0, iOS 27.0, *)
 extension LibraryItemEntity: SyncableEntity {}
+#endif
