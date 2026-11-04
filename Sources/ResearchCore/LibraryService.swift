@@ -74,13 +74,30 @@ public actor LibraryService: RetrievalService {
     self.readerLoader = readerLoader
     metadata =
       providers.map { MetadataResolutionService(providers: $0) } ?? .live(transport: transport)
-    let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[
-      0
-    ].appendingPathComponent(
-      "ResearchLibrary/\(Files.stableID(root.standardizedFileURL.path))/index.sqlite")
-    let indexURL = databaseURL ?? support
+    let indexURL = databaseURL ?? Self.indexFolder(for: root).appendingPathComponent("index.sqlite")
     database = try LocalDatabase(url: indexURL)
     searchReader = LibrarySearchReader(url: indexURL)
+  }
+  /// Where the rebuildable search index for a library folder lives (never inside the library).
+  public static func indexFolder(for root: URL, support: URL? = nil) -> URL {
+    let base = support ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    return base.appendingPathComponent("ResearchLibrary/\(Files.stableID(root.standardizedFileURL.path))", isDirectory: true)
+  }
+  /// Index folders for library locations other than `root` (for example the old iCloud folder
+  /// after a move), with their sizes. Only UUID-named folders are considered, so caches such
+  /// as Thumbnails are never included.
+  public static func otherIndexFolders(keeping root: URL, support: URL? = nil) -> [(url: URL, bytes: Int64)] {
+    let current = indexFolder(for: root, support: support).standardizedFileURL.path
+    let parent = indexFolder(for: root, support: support).deletingLastPathComponent()
+    guard let folders = try? FileManager.default.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil)
+    else { return [] }
+    return folders.filter { UUID(uuidString: $0.lastPathComponent) != nil && $0.standardizedFileURL.path != current }
+      .map { folder in
+        let bytes = (FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.fileSizeKey])?
+          .compactMap { ($0 as? URL).flatMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize } }
+          .reduce(0, +)) ?? 0
+        return (folder, Int64(bytes))
+      }
   }
   public nonisolated func search(
     _ query: String, filters: SearchFilters = SearchFilters(), limit: Int = 100, offset: Int = 0

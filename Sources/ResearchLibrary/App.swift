@@ -263,6 +263,8 @@ typealias ViewState<Value> = SwiftUI.State<Value>
         }
         try LibraryAccess.store(destination)
         open(destination)
+        // The old location's search index is only a cache; free its space now.
+        try? FileManager.default.removeItem(at: LibraryService.indexFolder(for: source))
         var summary = "Moved \(report.totalFiles) files (\(report.filesCopied) copied now, every copy verified). The library now lives in \(destination.path). The old iCloud folder was left untouched; delete it once you are happy."
         if !report.preexistingHashDifferences.isEmpty {
           summary += " Note: \(report.preexistingHashDifferences.count) attachments already differed from their recorded checksum in the old library (copied exactly as they were)."
@@ -961,6 +963,18 @@ struct SettingsView: View {
         Button(model.migrating ? "Moving…" : "Move Library to a Local Folder…") { model.moveLibraryToLocalFolder() }
           .disabled(model.root == nil || model.migrating)
         if let status = model.migrationStatus { Text(status).font(.caption) }
+        if let root = model.root {
+          let stale = LibraryService.otherIndexFolders(keeping: root)
+          if !stale.isEmpty {
+            let total = ByteCountFormatter.string(fromByteCount: stale.reduce(0) { $0 + $1.bytes }, countStyle: .file)
+            Button("Remove \(stale.count) Old Search Index\(stale.count == 1 ? "" : "es") (\(total))") {
+              for folder in stale { try? FileManager.default.removeItem(at: folder.url) }
+              model.migrationStatus = "Removed old search indexes (\(total)). They are caches for other library locations and rebuild automatically if you ever open those folders again."
+            }
+            Text("Indexes left over from library locations you no longer use, such as the old iCloud folder.")
+              .font(.caption).foregroundStyle(.secondary)
+          }
+        }
       }
       Section("iPhone capture") {
         Text(CaptureInbox.restore()?.path ?? "Not set. The iPhone app saves into this iCloud folder, and this Mac moves the captures into the library.")

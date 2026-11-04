@@ -159,3 +159,19 @@ extension LibraryMigrationTests {
     #expect(try Data(contentsOf: destination.appendingPathComponent("Inbox/arrived-during-move.pdf")) == Data("%PDF late".utf8))
   }
 }
+
+extension LibraryMigrationTests {
+  @Test func otherIndexFoldersExcludeCurrentLibraryAndCaches() throws {
+    defer { try? FileManager.default.removeItem(at: base) }
+    let support = base.appendingPathComponent("Support")
+    let current = LibraryService.indexFolder(for: destination, support: support)
+    let old = LibraryService.indexFolder(for: source, support: support)
+    for folder in [current, old, support.appendingPathComponent("ResearchLibrary/Thumbnails")] {
+      try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+      try Data(count: 10).write(to: folder.appendingPathComponent("index.sqlite"))
+    }
+    let stale = LibraryService.otherIndexFolders(keeping: destination, support: support)
+    #expect(stale.map(\.url.standardizedFileURL.path) == [old.standardizedFileURL.path])
+    #expect(stale.first?.bytes == 10)
+  }
+}
