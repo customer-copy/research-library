@@ -265,6 +265,18 @@ public enum Files {
     }
     try FileManager.default.moveItem(at: temporary, to: destination)
   }
+  /// How many earlier versions of each item's metadata are kept in Recovery/Metadata/<id>/.
+  public static let recoveryVersionsPerItem = 20
+  /// Deletes all but the `keep` most recently modified .json files in `folder`.
+  static func pruneOldest(in folder: URL, keep: Int) {
+    guard let files = try? FileManager.default.contentsOfDirectory(
+      at: folder, includingPropertiesForKeys: [.contentModificationDateKey]
+    ).filter({ $0.pathExtension == "json" }), files.count > keep else { return }
+    let dated = files.map { url in
+      (url, (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+    }.sorted { $0.1 > $1.1 }
+    for (url, _) in dated.dropFirst(keep) { try? FileManager.default.removeItem(at: url) }
+  }
   public static func permanentlyRemove(_ url: URL) throws {
     var coordinationError: NSError?
     var result: Result<Void, Error>?
@@ -327,6 +339,7 @@ public struct SidecarService: Sendable {
           let previous = backup.appendingPathComponent(hash + ".json")
           if !FileManager.default.fileExists(atPath: previous.path) {
             try oldData.write(to: previous, options: .atomic)
+            Files.pruneOldest(in: backup, keep: Files.recoveryVersionsPerItem)
           }
         }
         envelope["item"] = fresh

@@ -297,9 +297,14 @@ public final class LocalDatabase: @unchecked Sendable {
     try transaction {
       let id = itemID.uuidString
       let rid = resourceID.uuidString
-      for table in ["pages", "chunks", "page_fts"] {
+      for table in ["pages", "chunks"] {
         _ = try rows("DELETE FROM \(table) WHERE item_id=? AND resource_id=?", [id, rid])
       }
+      // page_fts's item/resource columns are UNINDEXED (a WHERE on them scans every page in
+      // the library); delete by rowid through the indexed lookup table instead.
+      _ = try rows(
+        "DELETE FROM page_fts WHERE rowid IN (SELECT fts_rowid FROM page_fts_lookup WHERE item_id=? AND resource_id=?)",
+        [id, rid])
       _ = try rows("DELETE FROM page_fts_lookup WHERE item_id=? AND resource_id=?", [id, rid])
       for p in pages {
         _ = try rows(
@@ -334,7 +339,8 @@ public final class LocalDatabase: @unchecked Sendable {
   public func remove(_ id: UUID) throws {
     try transaction {
       _ = try rows("DELETE FROM item_fts WHERE rowid IN (SELECT fts_rowid FROM item_fts_lookup WHERE item_id=?)", [id.uuidString])
-      _ = try rows("DELETE FROM page_fts WHERE item_id=?", [id.uuidString])
+      _ = try rows("DELETE FROM page_fts WHERE rowid IN (SELECT fts_rowid FROM page_fts_lookup WHERE item_id=?)", [id.uuidString])
+      _ = try rows("DELETE FROM page_fts_lookup WHERE item_id=?", [id.uuidString])
       _ = try rows("DELETE FROM items WHERE id=?", [id.uuidString])
       _ = try rows("DELETE FROM authors WHERE id NOT IN (SELECT author_id FROM item_authors)")
       _ = try rows("DELETE FROM tags WHERE name NOT IN (SELECT name FROM item_tags)")

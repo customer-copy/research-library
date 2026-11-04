@@ -17,6 +17,8 @@ public struct InboxArchiveReport: Codable, Sendable {
   public var needsReview = 0
   public var otherFiles = 0
   public var removedArchives: [String] = []
+  /// Archives kept (moved to Needs Review) because some PDFs could not be attached or copied.
+  public var keptArchives: [String] = []
 }
 public actor LibraryService: RetrievalService {
   public let root: URL
@@ -581,8 +583,11 @@ public actor LibraryService: RetrievalService {
       permanentlyCancelledRequests.formUnion(plan.requestIDs)
       cancelledRequests.formUnion(plan.requestIDs)
       if plan.paths.isEmpty {
-        try Files.permanentlyRemove(sidecars.url(plan.id))
-        try database.remove(plan.id)
+        // Completed deletion. This runs every poll, so only act if something reappeared
+        // (for example a stale copy of the metadata synced back from another device).
+        let sidecar = sidecars.url(plan.id)
+        if FileManager.default.fileExists(atPath: sidecar.path) { try Files.permanentlyRemove(sidecar) }
+        if try database.item(plan.id) != nil { try database.remove(plan.id) }
         continue
       }
       let others = try sidecars.metadataFiles().map { try sidecars.read($0) }.filter { $0.id != plan.id }
@@ -1238,20 +1243,34 @@ public actor LibraryService: RetrievalService {
     lastSidecarStamp.removeAll()
     revision += 1
     resetSpotlight()
+    // Pass 1: restore every item's metadata so the library is fully browsable and
+    // searchable by metadata quickly. One bad item is recorded and skipped, never fatal.
+    var restored: [LibraryItem] = []
     for var item in items {
-      for index in item.resources.indices {
-        if let path = item.resources[index].relativePath,
-          !FileManager.default.fileExists(
-            atPath: (try Files.safeURL(root: root, relative: path)).path)
-        {
-          item.resources[index].availability = .missing
+      do {
+        for index in item.resources.indices {
+          if let path = item.resources[index].relativePath,
+            !FileManager.default.fileExists(
+              atPath: (try Files.safeURL(root: root, relative: path)).path)
+          {
+            item.resources[index].availability = .missing
+          }
         }
-      }
-      try database.upsert(item)
-      do { try await indexAttachments(item) } catch {
+        try database.upsert(item)
+        restored.append(item)
+        spotlight(item)
+      } catch {
         issues.append(IntegrityIssue(path: item.id.uuidString, message: error.localizedDescription))
       }
-      spotlight(item)
+    }
+    revision += 1
+    // Pass 2: PDF text (slow; OCR for scans).
+    for (position, item) in restored.enumerated() {
+      if position % 10 == 0 { try Task.checkCancellation(); await Task.yield() }
+      do { try await indexAttachments(item) } catch is CancellationError { throw CancellationError() }
+      catch {
+        issues.append(IntegrityIssue(path: item.id.uuidString, message: error.localizedDescription))
+      }
     }
     return issues
   }
@@ -1513,6 +1532,7 @@ public actor LibraryService: RetrievalService {
       let reviewRoot = root.appendingPathComponent("Needs Review/Paperpile ZIPs/")
         .appendingPathComponent(Files.sanitized(archive.deletingPathExtension().lastPathComponent))
       var attachments: [ArchiveAttachment] = []
+      var lost = 0
       for (position, file) in files.enumerated() {
         if position % 20 == 0 { try Task.checkCancellation(); await Task.yield() }
         let relative = String(file.path.dropFirst(extracted.path.count + 1))
@@ -1573,33 +1593,46 @@ public actor LibraryService: RetrievalService {
       for start in stride(from: 0, to: grouped.count, by: 8) {
         let end = min(start + 8, grouped.count)
         let batch = Array(grouped[start..<end])
-        await withTaskGroup(of: (Int, Int).self) { group in
+        await withTaskGroup(of: (Int, Int, Int).self) { group in
           for records in batch {
             group.addTask {
               var attached = 0
               var review = 0
+              var unplaced = 0
               for record in records {
                 do {
                   _ = try await self.attachLocatedPDF(
                     nil, file: record.file, remote: nil, id: record.itemID, index: false)
                   attached += 1
                 } catch {
-                  try? Files.atomicCopy(record.file, to: Files.uniqueURL(record.review))
-                  review += 1
+                  do {
+                    try Files.atomicCopy(record.file, to: Files.uniqueURL(record.review))
+                    review += 1
+                  } catch { unplaced += 1 }  // e.g. disk full: neither attached nor set aside
                 }
               }
-              return (attached, review)
+              return (attached, review, unplaced)
             }
           }
           for await outcome in group {
             report.attached += outcome.0
             report.needsReview += outcome.1
+            lost += outcome.2
           }
         }
       }
-      try Files.permanentlyRemove(archive)
       report.archives += 1
-      report.removedArchives.append(archive.lastPathComponent)
+      if lost == 0 {
+        try Files.permanentlyRemove(archive)
+        report.removedArchives.append(archive.lastPathComponent)
+      } else {
+        // Some PDFs exist only inside the archive now. Keep it, out of the Inbox so it isn't
+        // reprocessed; if even that fails, it stays in the Inbox untouched.
+        let kept = Files.uniqueURL(reviewRoot.appendingPathComponent(archive.lastPathComponent))
+        try Files.atomicCopy(archive, to: kept)
+        try Files.permanentlyRemove(archive)
+        report.keptArchives.append(archive.lastPathComponent)
+      }
     }
     pdfCatalog = nil
     return report
