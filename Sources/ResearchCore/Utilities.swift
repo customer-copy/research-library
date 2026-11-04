@@ -76,7 +76,8 @@ public enum Identifiers {
       throw LibraryError.invalid("Private network URLs cannot be fetched.")
     }
     c.scheme = scheme
-    c.host = host
+    // IPv6 literals must keep their brackets in a URL.
+    if host.contains(":") { c.percentEncodedHost = "[\(host)]" } else { c.host = host }
     c.fragment = nil
     c.queryItems = c.queryItems?.filter {
       !$0.name.lowercased().hasPrefix("utm_")
