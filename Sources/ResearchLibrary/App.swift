@@ -22,7 +22,9 @@ typealias ViewState<Value> = SwiftUI.State<Value>
   @Published var busy = false
   @Published var root: URL?
   @Published var showCapture = false
-  @Published var editor: ResearchCore.LibraryItem?
+  @Published var editor: ResearchCore.LibraryItem? { didSet { if editor?.id != oldValue?.id { editorError = nil; editorConflict = false } } }
+  @Published var editorError: String?
+  @Published var editorConflict = false
   @Published var permanentDeletion: ResearchCore.LibraryItem?
   @Published var issues: [IntegrityIssue] = []
   @Published var showIssues = false
@@ -534,6 +536,50 @@ typealias ViewState<Value> = SwiftUI.State<Value>
     var item = item
     item.read.toggle()
     save(item)
+  }
+  /// "Delete (Keep Recovery Copy)": closes the item's reader tabs first, exactly like
+  /// permanent deletion, so a tab with pending highlights can't block closing or quitting.
+  func softDelete(_ item: ResearchCore.LibraryItem) {
+    guard let library else { return }
+    busy = true
+    Task {
+      defer { busy = false }
+      await ReaderWorkspace.shared.discardForDeletion(item.id)
+      do {
+        try await library.remove(item.id)
+        results.removeAll { $0.item.id == item.id }
+        if editor?.id == item.id { editor = nil }
+        requests = try await library.requests()
+        refresh()
+      } catch {
+        ReaderWorkspace.shared.deletionFailed(item.id)
+        message = "Delete could not finish: " + error.localizedDescription
+      }
+    }
+  }
+  /// Saves from the metadata editor. The sheet closes only after the save succeeds; on
+  /// failure it stays open with the user's text intact and the reason shown.
+  func saveFromEditor(_ item: ResearchCore.LibraryItem, overwrite: Bool = false) {
+    guard let library else { editorError = "Choose a library folder first."; return }
+    var item = item
+    // "Save Anyway": the user chose their version over the newer one from another device.
+    if overwrite { item.dateModified = Date() }
+    editorError = nil; editorConflict = false
+    busy = true
+    Task {
+      defer { busy = false }
+      do {
+        try await library.edit(item)
+        if editor?.id == item.id { editor = nil }
+        requests = try await library.requests()
+        refresh()
+      } catch LibraryError.conflict(let text) {
+        editorConflict = true
+        editorError = text + " Choose Save Anyway to keep your version, or Cancel to discard it."
+      } catch {
+        editorError = "Could not save: " + error.localizedDescription
+      }
+    }
   }
   func permanentlyDelete(_ item: ResearchCore.LibraryItem) {
     guard let library else { return }
@@ -1502,7 +1548,7 @@ struct ItemActions: View {
     Button(item.read ? "Mark Unread" : "Mark Read") { model.toggleRead(item) }
     Divider()
     Button("Delete (Keep Recovery Copy)", role: .destructive) {
-      model.run { try await $0.remove(item.id) }
+      model.softDelete(item)
     }
     Button("Delete Permanently…", role: .destructive) { model.permanentDeletion = item }
   }
@@ -1702,6 +1748,31 @@ struct CaptureView: View {
 }
 struct MetadataEditor: View {
   @EnvironmentObject var model: LibraryModel
+  /// The edited item with the text fields (year, tags, collections, authors) applied.
+  private func prepared() -> ResearchCore.LibraryItem {
+    var item = self.item
+    item.year = Int(year)
+    item.tags = tags.split(separator: ",").map {
+      String($0).trimmingCharacters(in: .whitespaces)
+    }
+    item.collections = collections.split(separator: ",").map {
+      String($0).trimmingCharacters(in: .whitespaces)
+    }
+    if authors
+      != item.orderedAuthors.map({ $0.familyName + ", " + $0.givenName }).joined(
+        separator: "; ")
+    {
+      item.setAuthors(
+        authors.split(separator: ";").map {
+          let parts = $0.split(separator: ",", maxSplits: 1).map {
+            String($0).trimmingCharacters(in: .whitespaces)
+          }
+          return Author(
+            givenName: parts.count > 1 ? parts[1] : "", familyName: parts.first ?? "")
+        })
+    }
+    return item
+  }
   @ViewState<ResearchCore.LibraryItem> var item: ResearchCore.LibraryItem
   @ViewState<String> private var authors = ""
   @ViewState<String> private var tags = ""
@@ -1749,32 +1820,17 @@ struct MetadataEditor: View {
           Toggle("Read", isOn: $item.read)
         }
       }
+      if let problem = model.editorError {
+        Label(problem, systemImage: "exclamationmark.triangle.fill")
+          .foregroundStyle(.red).font(.callout).frame(maxWidth: .infinity, alignment: .leading)
+      }
       HStack {
         Button("Cancel") { model.editor = nil }
         Spacer()
-        Button("Save") {
-          item.year = Int(year)
-          item.tags = tags.split(separator: ",").map {
-            String($0).trimmingCharacters(in: .whitespaces)
-          }
-          item.collections = collections.split(separator: ",").map {
-            String($0).trimmingCharacters(in: .whitespaces)
-          }
-          if authors
-            != item.orderedAuthors.map({ $0.familyName + ", " + $0.givenName }).joined(
-              separator: "; ")
-          {
-            item.setAuthors(
-              authors.split(separator: ";").map {
-                let parts = $0.split(separator: ",", maxSplits: 1).map {
-                  String($0).trimmingCharacters(in: .whitespaces)
-                }
-                return Author(
-                  givenName: parts.count > 1 ? parts[1] : "", familyName: parts.first ?? "")
-              })
-          }
-          model.save(item)
-        }.buttonStyle(.borderedProminent)
+        if model.editorConflict {
+          Button("Save Anyway") { model.saveFromEditor(prepared(), overwrite: true) }
+        }
+        Button("Save") { model.saveFromEditor(prepared()) }.buttonStyle(.borderedProminent)
       }
     }.padding(24).frame(width: 650, height: 680).onAppear {
       authors = item.orderedAuthors.map { $0.familyName + ", " + $0.givenName }.joined(

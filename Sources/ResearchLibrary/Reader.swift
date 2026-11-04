@@ -2,6 +2,7 @@ import AppKit
 import PDFKit
 import ResearchCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Exclusive ownership transfers from a worker to the main actor after parsing completes.
 /// The worker never touches this PDFDocument again; PDFView remains on the main actor.
@@ -32,13 +33,12 @@ private final class PreparedReaderPDF: @unchecked Sendable {
   }
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
     let workspace = ReaderWorkspace.shared
-    guard workspace.documents.contains(where: { $0.dirty || $0.saving }) else {
+    guard workspace.documents.contains(where: \.hasUnsavedWork) else {
       return .terminateNow
     }
     Task {
-      let saved = await workspace.flush()
-      if !saved { workspace.showWindow() }
-      sender.reply(toApplicationShouldTerminate: saved)
+      let proceed = await workspace.resolveUnsaved(workspace.documents, action: "Quit")
+      sender.reply(toApplicationShouldTerminate: proceed)
     }
     return .terminateLater
   }
@@ -162,7 +162,7 @@ struct ReaderDownload: Identifiable {
     else { return }
     openGeneration += 1
     Task {
-      guard await document.flush() else { return }
+      guard await resolveUnsaved([document], action: "Close") else { return }
       document.remember()
       documents.removeAll { $0.id == document.id }
       if selectedID == document.id { selectedID = documents.first?.id }
@@ -177,6 +177,69 @@ struct ReaderDownload: Identifiable {
       if !(await document.flush()) { success = false }
     }
     return success
+  }
+  /// Like `flush()`, but gives up waiting after `timeout` (for example an iCloud write
+  /// that never completes) so quitting and closing can never hang indefinitely.
+  func flush(timeout: Duration) async -> Bool {
+    await Self.waitAtMost(timeout) { await self.flush() }
+  }
+  static func waitAtMost(_ timeout: Duration, _ work: @escaping @MainActor () async -> Bool) async -> Bool {
+    final class Once { var done = false }
+    let once = Once()
+    return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+      Task { @MainActor in
+        let result = await work()
+        if !once.done { once.done = true; continuation.resume(returning: result) }
+      }
+      Task { @MainActor in
+        try? await Task.sleep(for: timeout)
+        if !once.done { once.done = true; continuation.resume(returning: false) }
+      }
+    }
+  }
+  enum UnsavedChoice { case keepOpen, saveCopyThenContinue, discard }
+  /// Asks what to do when highlights could not be saved. Never leaves the user stuck.
+  func askAboutUnsaved(_ unsaved: [ReaderDocument], action: String) -> UnsavedChoice {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    let names = unsaved.map { "“\($0.title)”" }.prefix(3).joined(separator: ", ")
+    alert.messageText = "Highlights in \(names) could not be saved."
+    let reason = unsaved.compactMap(\.error).first.map { "\n\nReason: " + $0 } ?? ""
+    alert.informativeText =
+      "You can keep the reader open and try again, save a copy of the highlighted PDF elsewhere, or \(action.lowercased()) without these highlights.\(reason)"
+    alert.addButton(withTitle: "Keep Open")
+    alert.addButton(withTitle: "Save a Copy…")
+    alert.addButton(withTitle: "\(action) Without Saving")
+    alert.buttons.last?.hasDestructiveAction = true
+    switch alert.runModal() {
+    case .alertSecondButtonReturn: return .saveCopyThenContinue
+    case .alertThirdButtonReturn: return .discard
+    default: return .keepOpen
+    }
+  }
+  /// Flushes `targets`; if that fails, lets the user decide. Returns true when it is safe
+  /// to proceed with closing/quitting.
+  func resolveUnsaved(_ targets: [ReaderDocument], action: String) async -> Bool {
+    let saved = await Self.waitAtMost(.seconds(20)) {
+      var ok = true
+      for document in targets {
+        if !(await document.flush()) { ok = false }
+      }
+      return ok
+    }
+    if saved { return true }
+    showWindow()
+    let unsaved = targets.filter(\.hasUnsavedWork)
+    guard !unsaved.isEmpty else { return true }
+    switch askAboutUnsaved(unsaved, action: action) {
+    case .keepOpen: return false
+    case .saveCopyThenContinue:
+      for document in unsaved { guard document.exportCopy() else { return false } }
+      fallthrough
+    case .discard:
+      for document in unsaved { document.abandonUnsavedChanges() }
+      return true
+    }
   }
   func discardForDeletion(_ itemID: UUID) async {
     deletingItems.insert(itemID)
@@ -232,9 +295,12 @@ struct ReaderDownload: Identifiable {
   override func forwardingTarget(for selector: Selector!) -> Any? { original }
   func windowShouldClose(_ sender: NSWindow) -> Bool {
     guard let workspace else { return original?.windowShouldClose?(sender) ?? true }
-    if workspace.documents.contains(where: { $0.dirty || $0.saving }) {
+    if workspace.documents.contains(where: \.hasUnsavedWork) {
       Task {
-        if await workspace.flush() { sender.performClose(nil) } else { workspace.showWindow() }
+        if await workspace.resolveUnsaved(workspace.documents, action: "Close") {
+          for document in workspace.documents { document.remember() }
+          sender.performClose(nil)
+        }
       }
       return false
     }
@@ -318,7 +384,9 @@ struct ReaderAnnotation: Identifiable {
   private let memoryKey: String
   private let root: URL
   private let accessing: Bool
-  private var pendingData: Data?
+  /// Coalesces bursts of highlight edits so the whole PDF is serialized once per burst
+  /// rather than on every keystroke.
+  private var changeTask: Task<Void, Never>?
   static let colors: [(String, NSColor)] = [
     ("Yellow", .systemYellow), ("Green", .systemGreen), ("Blue", .systemBlue),
     ("Pink", .systemPink), ("Orange", .systemOrange), ("Purple", .systemPurple),
@@ -650,33 +718,44 @@ struct ReaderAnnotation: Identifiable {
   func changed() {
     revision += 1
     dirty = true
-    pendingData = document.dataRepresentation()
-    refreshAnnotations()
     for page in (0..<document.pageCount).compactMap({ document.page(at: $0) })
     where !page.annotations.isEmpty {
       pdfView.annotationsChanged(on: page)
     }
     pdfView.documentView?.needsDisplay = true
-    startSave()
+    refreshAnnotations()
+    // Serializing the whole PDF is the expensive part; do it once per burst of edits.
+    changeTask?.cancel()
+    changeTask = Task { @MainActor [weak self] in
+      try? await Task.sleep(for: .milliseconds(600))
+      guard let self, !Task.isCancelled else { return }
+      self.changeTask = nil
+      self.startSave()
+    }
+  }
+  /// True while highlights still need saving (false once the user abandoned them).
+  var hasUnsavedWork: Bool { !retired && (dirty || saving) }
+  /// Runs any debounced work now (used before flushing).
+  private func settlePendingChange() {
+    changeTask?.cancel()
+    changeTask = nil
   }
   private func startSave() {
     guard saveTask == nil, dirty, !retired else { return }
     saving = true
     saveTask = Task { @MainActor [weak self] in
       guard let self else { return }
-      while self.dirty {
+      while self.dirty && !self.retired {
         let version = self.revision
-        guard let data = self.pendingData else {
+        // Serialize at save time, once per pass, instead of on every edit.
+        guard let data = self.document.dataRepresentation() else {
           self.error = "PDF could not be serialized"
           break
         }
         do {
           self.hash = try await self.library.savePDFAnnotations(
             itemID: self.itemID, resourceID: self.id, data: data, expectedHash: self.hash)
-          if version == self.revision {
-            self.dirty = false
-            self.pendingData = nil
-          }
+          if version == self.revision { self.dirty = false }
           self.error = nil
         } catch {
           self.error = error.localizedDescription
@@ -689,18 +768,41 @@ struct ReaderAnnotation: Identifiable {
   }
   func flush() async -> Bool {
     if retired { return true }
+    settlePendingChange()
     if saveTask == nil && dirty { startSave() }
     await saveTask?.value
     return !dirty
   }
   func discardForDeletion() async {
     retired = true
+    changeTask?.cancel(); changeTask = nil
     searchTask?.cancel()
     await saveTask?.value
     dirty = false
-    pendingData = nil
     edits.removeAllActions()
     UserDefaults.standard.removeObject(forKey: memoryKey)
+  }
+  /// The user chose to close or quit without the unsaved highlights. Any save still in
+  /// flight is left to finish or fail on its own; nothing new is started.
+  func abandonUnsavedChanges() {
+    retired = true
+    changeTask?.cancel(); changeTask = nil
+    dirty = false
+    edits.removeAllActions()
+    remember()
+  }
+  /// Writes the current highlighted PDF to a location the user picks. Returns true if saved.
+  func exportCopy() -> Bool {
+    let panel = NSSavePanel()
+    panel.allowedContentTypes = [.pdf]
+    panel.nameFieldStringValue = (title.isEmpty ? "Highlighted" : title) + " (highlighted).pdf"
+    panel.message = "Save a copy of this PDF with your unsaved highlights."
+    guard panel.runModal() == .OK, let destination = panel.url,
+      let data = document.dataRepresentation() else { return false }
+    do { try data.write(to: destination, options: .atomic); return true } catch {
+      self.error = "Could not save a copy: " + error.localizedDescription
+      return false
+    }
   }
   func reload() {
     guard !saving else { return }
@@ -718,9 +820,9 @@ struct ReaderAnnotation: Identifiable {
         document = fresh
         hash = snapshot.sha256
         pdfView.document = fresh
+        changeTask?.cancel(); changeTask = nil
         edits.removeAllActions()
         dirty = false
-        pendingData = nil
         error = nil
         buildOutline()
         refreshAnnotations()
