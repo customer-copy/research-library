@@ -128,31 +128,105 @@ public final class SafeRedirectDelegate: NSObject, URLSessionTaskDelegate, @unch
     completionHandler(request)
   }
 }
+/// Spaces requests per host. A slot is reserved *before* waiting, so concurrent callers queue
+/// one after another instead of all computing the same delay and firing together.
+public struct HostRateLimiter: Sendable {
+  private var nextSlot: [String: Date] = [:]
+  public init() {}
+  /// Minimum spacing per host, following each service's published guidance.
+  public static func interval(for host: String) -> TimeInterval {
+    switch host.lowercased() {
+    case "export.arxiv.org": return 3  // arXiv API terms: one request every three seconds
+    case "eutils.ncbi.nlm.nih.gov": return 0.34  // NCBI: three requests per second without a key
+    case "api.crossref.org", "api.openalex.org", "www.ebi.ac.uk", "api.datacite.org", "api.biorxiv.org":
+      return 0.25
+    default: return 1  // publisher pages
+    }
+  }
+  /// Returns when the caller may send, and books the following slot.
+  public mutating func reserve(host: String, now: Date = Date()) -> Date {
+    let slot = max(now, nextSlot[host] ?? .distantPast)
+    nextSlot[host] = slot.addingTimeInterval(Self.interval(for: host))
+    return slot
+  }
+}
+
+/// A small least-recently-used response cache. Keys omit credentials such as `api_key`.
+public struct ResponseCache: Sendable {
+  private var entries: [String: (Data, HTTPURLResponse)] = [:]
+  private var order: [String] = []
+  public let capacity: Int
+  public init(capacity: Int = 200) { self.capacity = capacity }
+  public static func key(_ url: URL) -> String {
+    guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url.absoluteString }
+    parts.queryItems = parts.queryItems?.filter { !["api_key", "apikey", "mailto", "email"].contains($0.name.lowercased()) }
+    if parts.queryItems?.isEmpty == true { parts.queryItems = nil }
+    return parts.string ?? url.absoluteString
+  }
+  public mutating func get(_ key: String) -> (Data, HTTPURLResponse)? {
+    guard let value = entries[key] else { return nil }
+    order.removeAll { $0 == key }; order.append(key)
+    return value
+  }
+  public mutating func set(_ key: String, _ value: (Data, HTTPURLResponse)) {
+    if entries[key] == nil { order.append(key) }
+    entries[key] = value
+    while order.count > capacity { entries[order.removeFirst()] = nil }
+  }
+  public var count: Int { entries.count }
+}
+
 public actor NativeHTTPTransport: HTTPTransport {
+  /// Optional contact address sent to metadata services. Crossref and OpenAlex route requests
+  /// that include one to their faster "polite" pools; NCBI asks for it too. Set in Settings.
+  public static let contactEmailKey = "metadataContactEmail"
   private let session: URLSession
-  private var lastRequest = Date.distantPast
-  private var cache: [String: (Data, HTTPURLResponse)] = [:]
-  public init() {
+  private var limiter = HostRateLimiter()
+  private var cache = ResponseCache()
+  private let contactEmail: String?
+  public init(contactEmail: String? = UserDefaults.standard.string(forKey: NativeHTTPTransport.contactEmailKey)) {
+    let email = contactEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
+    self.contactEmail = (email?.contains("@") == true) ? email : nil
     let config = URLSessionConfiguration.ephemeral
-    config.timeoutIntervalForRequest = 15
-    config.timeoutIntervalForResource = 30
-    config.httpAdditionalHeaders = [
-      "User-Agent": "ResearchLibrary/1.0 (native personal reference manager)"
-    ]
+    config.timeoutIntervalForRequest = 30
+    // Whole-transfer limit; PDFs on slow connections need far longer than an API call.
+    config.timeoutIntervalForResource = 300
+    var agent = "ResearchLibrary/1.0 (native personal reference manager"
+    if let email = self.contactEmail { agent += "; mailto:\(email)" }
+    config.httpAdditionalHeaders = ["User-Agent": agent + ")"]
     session = URLSession(
       configuration: config, delegate: SafeRedirectDelegate(), delegateQueue: nil)
   }
-  public func data(_ url: URL) async throws -> (Data, HTTPURLResponse) {
-    _ = try Identifiers.canonicalURL(url.absoluteString)
+  /// Adds the contact address as the query parameter each polite-pool API expects.
+  func withContact(_ url: URL) -> URL {
+    guard let email = contactEmail, let host = url.host?.lowercased(),
+      var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+    let name: String
+    switch host {
+    case "api.crossref.org", "api.openalex.org": name = "mailto"
+    case "eutils.ncbi.nlm.nih.gov": name = "email"
+    default: return url
+    }
+    var items = parts.queryItems ?? []
+    guard !items.contains(where: { $0.name == name }) else { return url }
+    items.append(URLQueryItem(name: name, value: email))
+    parts.queryItems = items
+    return parts.url ?? url
+  }
+  public func data(_ requested: URL) async throws -> (Data, HTTPURLResponse) {
+    _ = try Identifiers.canonicalURL(requested.absoluteString)
     // A public-looking name can still point at this Mac or the LAN; check what it resolves to.
-    if let host = url.host, NetworkSafety.resolvesToNonPublicAddress(host) {
+    if let host = requested.host, NetworkSafety.resolvesToNonPublicAddress(host) {
       throw LibraryError.invalid("Local and private network URLs cannot be fetched.")
     }
-    if let cached = cache[url.absoluteString] { return cached }
+    let key = ResponseCache.key(requested)
+    if let cached = cache.get(key) { return cached }
+    let url = withContact(requested)
+    let host = url.host?.lowercased() ?? ""
     for attempt in 0..<3 {
-      let delay = max(0, 3 - Date().timeIntervalSince(lastRequest))
-      if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
-      lastRequest = Date()
+      let slot = limiter.reserve(host: host)
+      let wait = slot.timeIntervalSinceNow
+      if wait > 0 { try await Task.sleep(for: .seconds(wait)) }
       let (data, response) = try await session.data(from: url)
       guard let http = response as? HTTPURLResponse else {
         throw LibraryError.invalid("Non-HTTP response")
@@ -171,7 +245,7 @@ public actor NativeHTTPTransport: HTTPTransport {
       guard (200..<300).contains(http.statusCode) else {
         throw HTTPStatusError(statusCode: http.statusCode)
       }
-      if data.count < 2 * 1024 * 1024 { cache[url.absoluteString] = (data, http) }
+      if data.count < 2 * 1024 * 1024 { cache.set(key, (data, http)) }
       return (data, http)
     }
     throw LibraryError.invalid("Provider unavailable")

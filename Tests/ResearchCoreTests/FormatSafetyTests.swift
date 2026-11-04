@@ -42,8 +42,11 @@ import Testing
     item.setAuthors([Author(givenName: "Ada", familyName: "Lovelace")])
     item.resources = [Resource(itemID: item.id, type: .pdf, path: "PDFs/x.pdf", availability: .local)]
     item.tags = ["a"]
+    // Dates are stored to whole seconds, so compare what is written, not the in-memory value.
     let data = try PortableJSON.encoder().encode(item)
-    #expect(try PortableJSON.decoder().decode(LibraryItem.self, from: data) == item)
+    let decoded = try PortableJSON.decoder().decode(LibraryItem.self, from: data)
+    #expect(try PortableJSON.encoder().encode(decoded) == data)
+    #expect(decoded.authors == item.authors && decoded.resources.map(\.relativePath) == ["PDFs/x.pdf"])
   }
 
   @Test func migrationsRunOnceAndRecordTheirVersion() throws {

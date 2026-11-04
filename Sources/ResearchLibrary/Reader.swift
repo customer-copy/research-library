@@ -376,6 +376,9 @@ struct ReaderAnnotation: Identifiable {
   private var appliedScale = 1.0
   private var observers: [NSObjectProtocol] = []
   private var searchTask: Task<Void, Never>?
+  /// Page text for Find, extracted once off the main thread from a private copy of the file.
+  /// Highlights don't change the text, so the saved file's text matches what's on screen.
+  private var pageTexts: [String]?
   private var saveTask: Task<Void, Never>?
   private var revision = 0
   private var restoring = true
@@ -569,28 +572,46 @@ struct ReaderAnnotation: Identifiable {
       return
     }
     searching = true
-    // Search one page at a time so large documents do not freeze the reader.
+    // Text extraction and matching run off the main thread; only building the on-screen
+    // selections for the hits happens here.
     searchTask = Task { @MainActor [weak self] in
       try? await Task.sleep(for: .milliseconds(200))
       guard let self, !Task.isCancelled else { return }
-      var found: [PDFSelection] = []
-      for index in 0..<self.document.pageCount {
-        if Task.isCancelled { return }
-        if let page = self.document.page(at: index), let text = page.string {
+      if self.pageTexts == nil {
+        guard let snapshot = try? await self.library.readPDFForReader(itemID: self.itemID, resourceID: self.id)
+        else { self.searching = false; return }
+        let data = snapshot.data
+        self.pageTexts = await Task.detached(priority: .userInitiated) { () -> [String] in
+          guard let copy = PDFDocument(data: data) else { return [] }
+          return (0..<copy.pageCount).map { copy.page(at: $0)?.string ?? "" }
+        }.value
+        guard !Task.isCancelled else { return }
+      }
+      let texts = self.pageTexts ?? []
+      let worker = Task.detached(priority: .userInitiated) { () -> [(Int, NSRange)] in
+        var hits: [(Int, NSRange)] = []
+        for (index, text) in texts.enumerated() {
+          if Task.isCancelled { return [] }
           let string = text as NSString
           var range = NSRange(location: 0, length: string.length)
           while range.length > 0 {
             let match = string.range(of: query, options: .caseInsensitive, range: range)
             if match.location == NSNotFound { break }
-            if let selection = page.selection(for: match) {
-              selection.color = .systemOrange.withAlphaComponent(0.35)
-              found.append(selection)
-            }
+            hits.append((index, match))
             let end = NSMaxRange(match)
             range = NSRange(location: end, length: string.length - end)
           }
         }
-        if index % 8 == 0 { await Task.yield() }
+        return hits
+      }
+      let hits = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+      guard !Task.isCancelled else { return }
+      var found: [PDFSelection] = []
+      for (index, range) in hits.prefix(2000) {
+        if let page = self.document.page(at: index), let selection = page.selection(for: range) {
+          selection.color = .systemOrange.withAlphaComponent(0.35)
+          found.append(selection)
+        }
       }
       self.matches = found
       self.searching = false
@@ -821,6 +842,7 @@ struct ReaderAnnotation: Identifiable {
         hash = snapshot.sha256
         pdfView.document = fresh
         changeTask?.cancel(); changeTask = nil
+        pageTexts = nil
         edits.removeAllActions()
         dirty = false
         error = nil
@@ -1355,7 +1377,7 @@ struct ReaderPageThumbnail: View {
         reader.page == index + 1 ? Color.accentColor.opacity(0.15) : Color.clear,
         in: RoundedRectangle(cornerRadius: 5))
     }.buttonStyle(.plain).task {
-      image = ReaderThumbnailCache.shared.image(for: reader, page: index)
+      image = await ReaderThumbnailCache.shared.image(for: reader, page: index)
     }
   }
 }
@@ -1370,26 +1392,44 @@ struct ReaderPageThumbnail: View {
     try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     memory.countLimit = 160
   }
-  func image(for reader: ReaderDocument, page index: Int) -> NSImage? {
+  private var writesSincePrune = 0
+  private var pruning = false
+  /// Memory cache first; then the disk cache (read off the main thread); otherwise render the
+  /// page here (PDFKit's document belongs to the main thread) and encode/write it in the
+  /// background. Pruning the 250 MB disk cache runs in the background every 40 new files.
+  func image(for reader: ReaderDocument, page index: Int) async -> NSImage? {
     let key = reader.hash + "-" + String(index)
     if let image = memory.object(forKey: key as NSString) { return image }
     let file = root.appendingPathComponent(key).appendingPathExtension("png")
-    if let data = try? Data(contentsOf: file), let image = NSImage(data: data) {
-      memory.setObject(image, forKey: key as NSString)
+    let cached = await Task.detached(priority: .utility) { () -> NSImage? in
+      guard let data = try? Data(contentsOf: file), let image = NSImage(data: data) else { return nil }
       try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
       return image
+    }.value
+    if let cached {
+      memory.setObject(cached, forKey: key as NSString)
+      return cached
     }
-    guard let image = reader.document.page(at: index)?.thumbnail(
+    guard !Task.isCancelled, let image = reader.document.page(at: index)?.thumbnail(
       of: NSSize(width: 170, height: 230), for: .cropBox) else { return nil }
     memory.setObject(image, forKey: key as NSString)
-    if let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
-      let png = bitmap.representation(using: .png, properties: [:]) {
-      try? png.write(to: file, options: .atomic)
-      pruneIfNeeded()
+    writesSincePrune += 1
+    let prune = writesSincePrune >= 40 && !pruning
+    if prune { writesSincePrune = 0; pruning = true }
+    let root = self.root, limit = maximumBytes
+    Task.detached(priority: .background) { [weak self] in
+      if let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+        let png = bitmap.representation(using: .png, properties: [:]) {
+        try? png.write(to: file, options: .atomic)
+      }
+      if prune {
+        Self.prune(root, limit: limit)
+        await MainActor.run { self?.pruning = false }
+      }
     }
     return image
   }
-  private func pruneIfNeeded() {
+  nonisolated private static func prune(_ root: URL, limit: Int) {
     let manager = FileManager.default
     guard let files = try? manager.contentsOfDirectory(at: root, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]) else { return }
     let records = files.compactMap { file -> (URL, Int, Date)? in
@@ -1397,7 +1437,7 @@ struct ReaderPageThumbnail: View {
       return (file, values.fileSize ?? 0, values.contentModificationDate ?? .distantPast)
     }
     var total = records.reduce(0) { $0 + $1.1 }
-    for record in records.sorted(by: { $0.2 < $1.2 }) where total > maximumBytes {
+    for record in records.sorted(by: { $0.2 < $1.2 }) where total > limit {
       try? manager.removeItem(at: record.0)
       total -= record.1
     }
@@ -1531,7 +1571,8 @@ struct ReaderPDFSurface: NSViewRepresentable {
           try check(await reader.flush(), "Persist highlight undo")
           reader.searchText = "lipid metabolism"
           reader.search()
-          try await Task.sleep(for: .milliseconds(600))
+          try await Task.sleep(for: .milliseconds(250))
+          for _ in 0..<50 where reader.searching { try await Task.sleep(for: .milliseconds(100)) }
           try check(!reader.matches.isEmpty, "Find in PDF")
           reader.searchText = ""
           reader.search()
@@ -1680,7 +1721,8 @@ struct ReaderPDFSurface: NSViewRepresentable {
           && min(horizontalSpace, verticalSpace) < 25, "Fit page")
         reader.searchText = "lipid metabolism"
         reader.search()
-        try await Task.sleep(for: .milliseconds(700))
+        try await Task.sleep(for: .milliseconds(250))
+        for _ in 0..<50 where reader.searching { try await Task.sleep(for: .milliseconds(100)) }
         try check(reader.matches.count == 6, "Search matches across pages")
         reader.showMatch(3)
         try check(reader.matchIndex == 3, "Search result navigation")

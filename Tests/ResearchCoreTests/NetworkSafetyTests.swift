@@ -59,3 +59,38 @@ extension NetworkSafetyTests {
     #expect(inside.path.hasSuffix("/Library/PDFs/Sub/new.pdf"))
   }
 }
+
+extension NetworkSafetyTests {
+  @Test func rateLimiterQueuesConcurrentCallersPerHost() {
+    var limiter = HostRateLimiter()
+    let now = Date(timeIntervalSince1970: 1_000)
+    let a = limiter.reserve(host: "export.arxiv.org", now: now)
+    let b = limiter.reserve(host: "export.arxiv.org", now: now)
+    let c = limiter.reserve(host: "export.arxiv.org", now: now)
+    #expect(a == now)
+    #expect(b.timeIntervalSince(a) == 3 && c.timeIntervalSince(b) == 3)
+    // Another host is not held up by arXiv's queue.
+    #expect(limiter.reserve(host: "api.crossref.org", now: now) == now)
+  }
+
+  @Test func responseCacheIsBoundedAndKeysOmitCredentials() throws {
+    var cache = ResponseCache(capacity: 2)
+    let response = HTTPURLResponse(url: URL(string: "https://a.org")!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+    let keyed = ResponseCache.key(URL(string: "https://api.openalex.org/works?search=x&api_key=SECRET")!)
+    #expect(!keyed.contains("SECRET"))
+    cache.set("1", (Data(), response)); cache.set("2", (Data(), response))
+    _ = cache.get("1")  // 1 is now most recent
+    cache.set("3", (Data(), response))
+    #expect(cache.count == 2 && cache.get("2") == nil && cache.get("1") != nil)
+  }
+
+  @Test func contactEmailGoesOnlyToPolitePoolAPIs() async {
+    let transport = NativeHTTPTransport(contactEmail: "me@example.org")
+    let crossref = await transport.withContact(URL(string: "https://api.crossref.org/works/10.1/x")!)
+    #expect(crossref.absoluteString.contains("mailto=me@example.org"))
+    let publisher = await transport.withContact(URL(string: "https://www.nature.com/articles/x")!)
+    #expect(!publisher.absoluteString.contains("example.org"))
+    let none = await NativeHTTPTransport(contactEmail: nil).withContact(URL(string: "https://api.openalex.org/works")!)
+    #expect(!none.absoluteString.contains("mailto"))
+  }
+}

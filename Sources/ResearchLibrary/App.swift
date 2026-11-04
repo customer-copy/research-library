@@ -975,6 +975,13 @@ struct SettingsView: View {
         Text("The key is stored in macOS Keychain and is only sent to api.openalex.org.")
           .font(.caption).foregroundStyle(.secondary)
       }
+      Section("Metadata lookups") {
+        TextField("Contact email (optional)", text: Binding(
+          get: { UserDefaults.standard.string(forKey: NativeHTTPTransport.contactEmailKey) ?? "" },
+          set: { UserDefaults.standard.set($0.trimmingCharacters(in: .whitespaces), forKey: NativeHTTPTransport.contactEmailKey) }))
+        Text("Sent only to Crossref, OpenAlex and PubMed, which give faster, more reliable service to requests that include a contact address. Takes effect after reopening the library.")
+          .font(.caption).foregroundStyle(.secondary)
+      }
       Section("PDF naming pattern") {
         TextField("Pattern", text: Binding(get: { UserDefaults.standard.string(forKey: "filenamePattern") ?? "{year} - {author} - {title}" }, set: { UserDefaults.standard.set($0, forKey: "filenamePattern") }))
         Text("Tokens: {year}, {author}, {title}").foregroundStyle(.secondary)
