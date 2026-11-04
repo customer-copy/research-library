@@ -969,6 +969,8 @@ struct ReaderToolbar: ToolbarContent {
       Button { reader.rotateCurrentPage() } label: { Label("Rotate", systemImage: "rotate.left") }
         .help("Rotate page left")
     }
+    // Grouped so the builder stays within 10 children on SDKs before macOS 27.
+    Group {
     ReaderToolbarSpacer()
     ToolbarItem(placement: .primaryAction) {
       Button { reader.showNavigation("annotations") } label: {
@@ -987,6 +989,7 @@ struct ReaderToolbar: ToolbarContent {
       // Keep system Search in the same trailing region as the reader commands.
       // Its automatic placement inserts flexible space after those commands.
       DefaultToolbarItem(kind: .search, placement: .primaryAction)
+    }
     }
   }
 }
