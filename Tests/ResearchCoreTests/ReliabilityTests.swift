@@ -273,7 +273,7 @@ extension CoreTests {
     changed.notes = "Edited while disk read was blocked"
     try await library.edit(changed)
     let elapsed = start.duration(to: .now)
-    #expect(elapsed < .seconds(1))
+    #expect(elapsed < timeBudget(1))
     print("Search and metadata edit during blocked PDF read: \(elapsed)")
     release.signal()
     _ = try await reading.value

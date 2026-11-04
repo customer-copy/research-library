@@ -1211,7 +1211,7 @@ struct FixedProvider: MetadataProvider {
     let hit = try db.search("unique15000", limit: 20)
     let duration = start.duration(to: clock.now)
     expectEqual(hit.count, 1)
-    expectTrue(duration < .seconds(2))
+    expectTrue(duration < timeBudget(2))
     print("20,000-item FTS search: \(duration)")
     var filters = SearchFilters()
     filters.sort = .title
@@ -1253,7 +1253,7 @@ struct FixedProvider: MetadataProvider {
     release.signal()
     await processing.value
     expectEqual(results.count, 1)
-    expectTrue(elapsed < .seconds(2))
+    expectTrue(elapsed < timeBudget(2))
     expectEqual(try await library.search("searchable").count, 1)
   }
 

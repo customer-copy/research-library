@@ -126,7 +126,7 @@ extension CoreTests {
     token.cancel()
     do { try await work.value; Issue.record("Expected cancellation of running SQLite query") }
     catch is CancellationError {} catch { Issue.record("Expected CancellationError, got \(error)") }
-    #expect(start.duration(to: .now) < .seconds(1))
+    #expect(start.duration(to: .now) < timeBudget(1))
     #expect(try db.search("usable").count == 1)
   }
 
@@ -152,7 +152,7 @@ extension CoreTests {
     let start = ContinuousClock.now
     let values = try await library.search("responsive")
     #expect(values.count == 1)
-    #expect(start.duration(to: .now) < .seconds(1))
+    #expect(start.duration(to: .now) < timeBudget(1))
     release.signal()
     await importing.value
   }

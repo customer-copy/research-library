@@ -30,7 +30,7 @@ struct BrowserCaptureTests {
     let start = ContinuousClock.now
     let added = try await library.consumeChromeCapture(id)
     let elapsed = start.duration(to: .now)
-    #expect(elapsed < .seconds(1))
+    #expect(elapsed < timeBudget(1))
     #expect(added.doi == "10.1038/s41586-026-11114-1" && added.journal == "Nature")
     #expect(added.year == 2026 && added.publicationDate == "2026-10-07")
     #expect(added.abstract == "Captured abstract.")
@@ -45,7 +45,7 @@ struct BrowserCaptureTests {
     try chromePayload(root: root, id: id, phase: "ready")
     let attachStart = ContinuousClock.now
     let attached = try await library.consumeChromeCapture(id)
-    #expect(attachStart.duration(to: .now) < .seconds(1))
+    #expect(attachStart.duration(to: .now) < timeBudget(1))
     #expect(attached.id == added.id && attached.hasPDF && attached.pdfLookup?.status == .available)
     #expect(attached.orderedAuthors.count == 2 && attached.abstract == added.abstract)
     #expect(try await library.requests().first?.state == .complete)
@@ -102,7 +102,8 @@ struct BrowserCaptureTests {
     let start = ContinuousClock.now
     let item = try await library.consumeChromeCapture(id)
     let elapsed = start.duration(to: .now)
-    #expect(item.hasPDF && elapsed < .seconds(1))
+    #expect(item.hasPDF)
+    #expect(elapsed < timeBudget(1))
     print("Chrome 88 MB local attachment: \(elapsed) (publisher transfer excluded)")
   }
   func link(id: UUID = UUID(), url: String = "https://example.org/paper", extra: [URLQueryItem] = []) throws -> URL {
