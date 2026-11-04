@@ -20,6 +20,9 @@ typealias ViewState<Value> = SwiftUI.State<Value>
   @Published var requests: [IngestionRequest] = []
   @Published var message: String?
   @Published var busy = false
+  @Published var migrating = false
+  @Published var migrationStatus: String?
+  @Published var captureInboxStatus: String?
   @Published var root: URL?
   @Published var showCapture = false
   @Published var editor: ResearchCore.LibraryItem? { didSet { if editor?.id != oldValue?.id { editorError = nil; editorConflict = false } } }
@@ -144,7 +147,7 @@ typealias ViewState<Value> = SwiftUI.State<Value>
     panel.canChooseFiles = false
     panel.canChooseDirectories = true
     panel.canCreateDirectories = true
-    panel.message = "Choose a Research Library folder in iCloud Drive or another location."
+    panel.message = "Choose your Research Library folder."
     if panel.runModal() == .OK, let url = panel.url {
       do {
         try LibraryAccess.store(url)
@@ -191,6 +194,7 @@ typealias ViewState<Value> = SwiftUI.State<Value>
         while !Task.isCancelled {
           do {
             await service.consumePendingChromeCaptures()
+            await self?.importCaptureInbox(into: url)
             try await service.pollInbox()
             try await service.synchronizeSidecars()
             if !(await service.isProcessing()) {
@@ -210,6 +214,98 @@ typealias ViewState<Value> = SwiftUI.State<Value>
         }
       }
     } catch { message = error.localizedDescription }
+  }
+  // MARK: Local library and iPhone capture Inbox
+
+  var libraryIsInICloud: Bool {
+    guard let root else { return false }
+    return root.path.contains("/Library/Mobile Documents/")
+      || (try? root.resourceValues(forKeys: [.isUbiquitousItemKey]).isUbiquitousItem) == true
+  }
+  /// Copies the whole library to a local folder (verifying every file), then switches to it.
+  /// The original folder is left untouched so it can serve as a fallback until deleted.
+  func moveLibraryToLocalFolder() {
+    guard let source = root, !migrating else { return }
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = false
+    panel.canChooseDirectories = true
+    panel.canCreateDirectories = true
+    panel.prompt = "Move Library Here"
+    panel.message = "Choose or create an empty folder that iCloud does not sync, such as “Research Library” in your home folder (not Documents or Desktop)."
+    panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+    guard panel.runModal() == .OK, let destination = panel.url else { return }
+    if destination.path.contains("/Library/Mobile Documents/") {
+      message = "That folder is in iCloud Drive. Choose a local folder instead."; return
+    }
+    migrating = true
+    migrationStatus = "Preparing to move…"
+    Task { @MainActor in
+      defer { migrating = false }
+      // Finish or resolve reader saves, then stop background work on the old location.
+      guard await ReaderWorkspace.shared.resolveUnsaved(ReaderWorkspace.shared.documents, action: "Move") else {
+        migrationStatus = "Move cancelled: the reader has unsaved highlights."; return
+      }
+      ReaderWorkspace.shared.documents.removeAll()
+      ReaderWorkspace.shared.isPresented = false
+      worker?.cancel(); processor?.cancel(); dashboardTask?.cancel(); organizationTask?.cancel()
+      let access = destination.startAccessingSecurityScopedResource()
+      defer { if access { destination.stopAccessingSecurityScopedResource() } }
+      do {
+        let report = try await LibraryMigration.copyLibrary(from: source, to: destination) { progress in
+          Task { @MainActor in
+            let percent = progress.totalBytes > 0 ? Int(Double(progress.bytesDone) / Double(progress.totalBytes) * 100) : 0
+            LibraryModel.shared.migrationStatus = "Copying \(progress.filesDone) of \(progress.totalFiles) files (\(percent)%)…"
+          }
+        }
+        guard report.isComplete else {
+          migrationStatus = "Move not finished: \(report.problems.count) files are missing from the new folder. Your library was not switched; run the move again to continue."
+          open(source); return
+        }
+        try LibraryAccess.store(destination)
+        open(destination)
+        var summary = "Moved \(report.totalFiles) files (\(report.filesCopied) copied now, every copy verified). The library now lives in \(destination.path). The old iCloud folder was left untouched; delete it once you are happy."
+        if !report.preexistingHashDifferences.isEmpty {
+          summary += " Note: \(report.preexistingHashDifferences.count) attachments already differed from their recorded checksum in the old library (copied exactly as they were)."
+        }
+        migrationStatus = summary
+      } catch is CancellationError {
+        migrationStatus = "Move paused. Run it again to continue where it stopped."; open(source)
+      } catch {
+        migrationStatus = "Move stopped: " + error.localizedDescription; open(source)
+      }
+    }
+  }
+  func chooseCaptureInbox() {
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = false
+    panel.canChooseDirectories = true
+    panel.canCreateDirectories = true
+    panel.prompt = "Use for iPhone Capture"
+    panel.message = "Choose or create a folder in iCloud Drive, such as “Research Library Inbox”. Pick the same folder in the iPhone capture app."
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    if let root, url.standardizedFileURL.path == root.standardizedFileURL.path {
+      message = "Choose a separate folder, not the library itself."; return
+    }
+    do {
+      try CaptureInbox.store(url)
+      _ = try? SidecarService(root: url)  // create Inbox/Requests so the iPhone app accepts it
+      captureInboxStatus = "iPhone captures are collected from \(url.lastPathComponent)."
+    } catch { message = error.localizedDescription }
+  }
+  func importCaptureInbox(into library: URL) async {
+    guard let inbox = CaptureInbox.restore() else { return }
+    let result = await Task.detached(priority: .utility) { () -> Result<Int, Error> in
+      let access = inbox.startAccessingSecurityScopedResource()
+      defer { if access { inbox.stopAccessingSecurityScopedResource() } }
+      return Result { try CaptureInbox.importPending(from: inbox, into: library) }
+    }.value
+    switch result {
+    case .success(let count) where count > 0:
+      captureInboxStatus = "Collected \(count) iPhone capture\(count == 1 ? "" : "s") at \(Date().formatted(date: .omitted, time: .shortened))."
+    case .failure(let error):
+      captureInboxStatus = "iPhone capture folder: " + error.localizedDescription
+    default: break
+    }
   }
   func refreshDashboard(forceOpenAlex: Bool = false) {
     dashboardTask?.cancel()
@@ -846,8 +942,30 @@ typealias ViewState<Value> = SwiftUI.State<Value>
 }
 struct SettingsView: View {
   @State private var openAlexKey = ""
+  @ObservedObject private var model = LibraryModel.shared
   var body: some View {
     Form {
+      Section("Library storage") {
+        Text(model.root?.path ?? "No library selected").font(.caption).textSelection(.enabled)
+        if model.libraryIsInICloud {
+          Text("This library is in iCloud Drive. Moving it to a local folder copies every file, checks each copy, and leaves the iCloud folder untouched.")
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        Button(model.migrating ? "Moving…" : "Move Library to a Local Folder…") { model.moveLibraryToLocalFolder() }
+          .disabled(model.root == nil || model.migrating)
+        if let status = model.migrationStatus { Text(status).font(.caption) }
+      }
+      Section("iPhone capture") {
+        Text(CaptureInbox.restore()?.path ?? "Not set. The iPhone app saves into this iCloud folder, and this Mac moves the captures into the library.")
+          .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+        HStack {
+          Button("Choose iCloud Capture Folder…") { model.chooseCaptureInbox() }
+          if CaptureInbox.restore() != nil {
+            Button("Stop", role: .destructive) { CaptureInbox.clear(); model.captureInboxStatus = nil }
+          }
+        }
+        if let status = model.captureInboxStatus { Text(status).font(.caption) }
+      }
       Section("OpenAlex") {
         SecureField("API key", text: $openAlexKey)
         HStack {

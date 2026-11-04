@@ -14,7 +14,7 @@ struct CaptureScreen: View {
   @ViewState<String> private var tags = ""
   @ViewState<String> private var note = ""
   @ViewState<String> private var status =
-    "Choose the same iCloud Drive library folder used on your Mac."
+    "Choose the iCloud Drive capture folder set in Research Library Settings on your Mac."
   @ViewState<Bool> private var chooseFolder = false
   @ViewState<Bool> private var choosePDF = false
   @ViewState<Bool> private var configured = false
@@ -22,7 +22,7 @@ struct CaptureScreen: View {
     NavigationStack {
       Form {
         Section("Library") {
-          Button("Choose Library Folder") { chooseFolder = true }
+          Button("Choose Capture Folder") { chooseFolder = true }
           Text(status).font(.caption)
         }
         Section("Capture") {
