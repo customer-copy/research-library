@@ -51,11 +51,50 @@ func libraryRoot() throws -> URL {
     relativeTo: nil, bookmarkDataIsStale: &stale)
 }
 
+// Mirrors ResearchCore's NetworkSafety literal checks so the helper rejects exactly what the
+// app would reject, instead of accepting a capture the app can never import.
+func isNonPublicIPv4(_ o: [UInt8]) -> Bool {
+  guard o.count == 4 else { return true }
+  switch (o[0], o[1]) {
+  case (0, _), (10, _), (127, _), (100, 64...127), (169, 254), (172, 16...31), (192, 168), (198, 18...19), (224...255, _):
+    return true
+  case (192, 0) where o[2] == 0: return true
+  default: return false
+  }
+}
+func isNonPublicHost(_ rawHost: String) -> Bool {
+  let host = rawHost.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]."))
+  if host.isEmpty || host == "localhost" || host.hasSuffix(".localhost") || host.hasSuffix(".local") { return true }
+  if host.contains(":") {
+    var address = in6_addr()
+    guard inet_pton(AF_INET6, host, &address) == 1 else { return true }
+    let b = withUnsafeBytes(of: &address) { Array($0) }
+    if b.allSatisfy({ $0 == 0 }) || (b[0..<15].allSatisfy({ $0 == 0 }) && b[15] == 1) { return true }
+    if (b[0] == 0xfe && (b[1] & 0x80) == 0x80) || (b[0] & 0xfe) == 0xfc || b[0] == 0xff { return true }
+    let mapped = b[0..<10].allSatisfy({ $0 == 0 }) && b[10] == 0xff && b[11] == 0xff
+    let nat64 = b[0] == 0 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b && b[4..<12].allSatisfy({ $0 == 0 })
+    if mapped || nat64 || b[0..<12].allSatisfy({ $0 == 0 }) { return isNonPublicIPv4(Array(b[12..<16])) }
+    return false
+  }
+  let labels = host.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+  let numeric: (String) -> Bool = { label in
+    !label.isEmpty && (label.allSatisfy { $0.isASCII && $0.isNumber }
+      || (label.hasPrefix("0x") && label.dropFirst(2).allSatisfy(\.isHexDigit)))
+  }
+  guard labels.allSatisfy(numeric) else { return false }
+  guard labels.count == 4, labels.allSatisfy({ !$0.hasPrefix("0x") && ($0 == "0" || !$0.hasPrefix("0")) }) else { return true }
+  let octets = labels.compactMap { UInt8($0) }
+  return octets.count != 4 || isNonPublicIPv4(octets)
+}
+
 func webURL(_ value: String) throws -> URL {
   guard value.utf8.count <= 8000, let parts = URLComponents(string: value),
     ["http", "https"].contains(parts.scheme?.lowercased() ?? ""),
     parts.user == nil, parts.password == nil, let host = parts.host?.lowercased(), !host.isEmpty,
     let url = parts.url else { throw HostError.invalid("Open an HTTP or HTTPS PDF or article first.") }
+  guard !isNonPublicHost(host) else {
+    throw HostError.invalid("Pages on this Mac or your local network can't be saved to Research Library.")
+  }
   return url
 }
 
@@ -139,6 +178,12 @@ func handle(_ message: [String: Any]) throws -> [String: Any] {
     let launched = notifyCapture(token)
     return ["ok": true, "status": "added", "appOpened": launched]
   case "captureFailed":
+    // A late or mismatched failure report must never downgrade a capture whose PDF was saved.
+    if let data = try? Data(contentsOf: try envelopeURL(root: root, id: token)),
+      let current = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      current["phase"] as? String == "ready" {
+      return ["ok": true, "status": "saved", "appOpened": notifyCapture(token)]
+    }
     try updateEnvelope(root: root, id: token, phase: "failed", error: String((message["error"] as? String ?? "PDF download failed.").prefix(1000)))
     let launched = notifyCapture(token)
     return ["ok": true, "status": "metadataOnly", "appOpened": launched]
@@ -201,71 +246,11 @@ func handle(_ message: [String: Any]) throws -> [String: Any] {
     guard upload?.id == token.lowercased() else { throw HostError.invalid("No matching PDF transfer.") }
     cancelUpload()
     return ["ok": true, "status": "cancelled"]
-  case "savePDF":
-    guard let encoded = message["data"] as? String, encoded.utf8.count <= 44_739_244,
-      let bytes = Data(base64Encoded: encoded), bytes.count <= 32 * 1024 * 1024,
-      bytes.starts(with: Data("%PDF-".utf8)), let pdf = PDFDocument(data: bytes), pdf.pageCount > 0 else {
-      throw HostError.invalid("The website did not return a readable PDF of 32 MB or less.")
-    }
-    let title = String((message["title"] as? String ?? "Article").prefix(100))
-    let bad = CharacterSet(charactersIn: "/\\:*?\"<>|").union(.controlCharacters)
-    let clean = title.components(separatedBy: bad).joined(separator: " ")
-      .split(whereSeparator: \.isWhitespace).joined(separator: " ")
-      .trimmingCharacters(in: CharacterSet(charactersIn: ". "))
-    let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
-    // Do not allow an Inbox symlink to redirect writes outside the selected library.
-    let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL.path
-    let inbox = URL(fileURLWithPath: resolvedRoot, isDirectory: true).appendingPathComponent("Inbox", isDirectory: true)
-    guard inbox.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(resolvedRoot + "/") else {
-      throw HostError.invalid("Inbox must be inside your selected library.")
-    }
-    try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
-    let isV2 = message["captureV2"] as? Bool == true
-    if isV2 {
-      let envelope = try envelopeURL(root: root, id: token)
-      guard FileManager.default.fileExists(atPath: envelope.path) else { throw HostError.invalid("Article capture is missing. Retry the save.") }
-    }
-    let name = isV2 ? "Chrome-\(token.lowercased()).pdf" : (clean.isEmpty ? "Article" : clean) + "-" + String(hash.prefix(16)) + ".pdf"
-    let target = inbox.appendingPathComponent(name)
-    var coordinationError: NSError?
-    var writeError: Error?
-    NSFileCoordinator().coordinate(writingItemAt: target, options: .forReplacing, error: &coordinationError) { url in
-      do {
-        if FileManager.default.fileExists(atPath: url.path) {
-          guard try Data(contentsOf: url) == bytes else { throw HostError.invalid("An unrelated file already uses this name.") }
-        } else {
-          try bytes.write(to: url, options: .atomic)
-        }
-      } catch { writeError = error }
-    }
-    if let error = coordinationError ?? writeError as NSError? { throw error }
-    if isV2 { try updateEnvelope(root: root, id: token, phase: "ready") }
-    let launched = isV2 ? notifyCapture(token) : openApp()
-    return ["ok": true, "status": "saved", "appOpened": launched]
-  case "capture":
-    guard let value = message["url"] as? String else { throw HostError.invalid("Missing article URL.") }
-    let url = try webURL(value)
-    var query = [URLQueryItem(name: "version", value: "1"), URLQueryItem(name: "id", value: token),
-      URLQueryItem(name: "url", value: url.absoluteString)]
-    if let title = message["title"] as? String { query.append(URLQueryItem(name: "title", value: String(title.prefix(500)))) }
-    if let pdf = message["pdfURL"] as? String { query.append(URLQueryItem(name: "pdfURL", value: try webURL(pdf).absoluteString)) }
-    if let doi = message["doi"] as? String, doi.count <= 200,
-      doi.range(of: "^10\\.[0-9]{4,9}/[-._;()/:A-Z0-9]+$", options: [.regularExpression, .caseInsensitive]) != nil {
-      query.append(URLQueryItem(name: "doi", value: doi))
-    }
-    if let pmid = message["pmid"] as? String, pmid.range(of: "^[0-9]{1,9}$", options: .regularExpression) != nil {
-      query.append(URLQueryItem(name: "pmid", value: pmid))
-    }
-    var link = URLComponents()
-    link.scheme = "researchlibrary"; link.host = "capture"; link.queryItems = query
-    guard let capture = link.url, capture.absoluteString.utf8.count <= 24_000, openApp(capture) else {
-      throw HostError.invalid("Could not reach Research Library. Open the app and try again.")
-    }
-    return ["ok": true, "status": "sent"]
   default: throw HostError.invalid("Unsupported native message.")
   }
 }
 
+var sequence: Int?
 // connectNative uses several bounded messages in one process. sendNativeMessage
 // remains compatible: Chrome closes stdin after receiving the first reply.
 while true {
@@ -275,16 +260,21 @@ while true {
     if header.isEmpty { break }
     if header.count < 4 { header.append(try readExactly(4 - header.count)) }
     let length = header.enumerated().reduce(UInt32(0)) { $0 | UInt32($1.element) << (8 * $1.offset) }
-    guard length > 0, length <= 48 * 1024 * 1024,
+    guard length > 0, length <= 2 * 1024 * 1024,
       let message = try JSONSerialization.jsonObject(with: readExactly(Int(length))) as? [String: Any] else {
       throw HostError.invalid("Invalid or oversized native message.")
     }
+    sequence = message["seq"] as? Int
     response = try handle(message)
   } catch {
     cancelUpload()
     response = ["ok": false, "error": error.localizedDescription]
   }
-  let output = try JSONSerialization.data(withJSONObject: response)
+  // Echo the request's sequence number so the extension can match replies to requests.
+  var reply = response
+  if let sequence { reply["seq"] = sequence }
+  sequence = nil
+  let output = try JSONSerialization.data(withJSONObject: reply)
   var length = UInt32(output.count).littleEndian
   try FileHandle.standardOutput.write(contentsOf: withUnsafeBytes(of: &length) { Data($0) })
   try FileHandle.standardOutput.write(contentsOf: output)

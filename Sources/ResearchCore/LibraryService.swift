@@ -45,6 +45,7 @@ public actor LibraryService: RetrievalService {
   public func generation() -> Int { revision }
   private var stableFiles: [String: (Int, Date)] = [:]
   private var chromeCaptureStamps: [UUID: Files.Revision] = [:]
+  private var chromeCaptureFailures: [UUID: Int] = [:]
   private var lastSidecarStamp: [String: Files.Revision] = [:]
   private var loadedSidecarStamps = false
   private let logger = Logger(subsystem: "org.researchlibrary.app", category: "Library")
@@ -280,6 +281,7 @@ public actor LibraryService: RetrievalService {
     return try database.item(item.id)!
   }
   public func consumePendingChromeCaptures() async {
+    sweepAbandonedChromeTransfers()
     let folder = root.appendingPathComponent("Inbox/BrowserCaptures")
     guard let files = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { return }
     for file in files where file.pathExtension == "json" {
@@ -288,8 +290,43 @@ public actor LibraryService: RetrievalService {
       do {
         _ = try await consumeChromeCapture(id)
         chromeCaptureStamps[id] = Files.revision(file)
+        chromeCaptureFailures[id] = nil
       }
-      catch { logger.error("Chrome capture requires retry: \(error.localizedDescription,privacy:.public)") }
+      catch {
+        logger.error("Chrome capture requires retry: \(error.localizedDescription,privacy:.public)")
+        // Validation/decoding errors will never succeed on retry. After a few attempts,
+        // set the envelope aside so it stops being retried every poll. A PDF that arrived
+        // with it stays in the Inbox and is imported as an ordinary file.
+        let permanent = error is DecodingError || {
+          if case LibraryError.invalid = error { return true } else { return false }
+        }()
+        guard permanent else { continue }
+        chromeCaptureFailures[id, default: 0] += 1
+        if chromeCaptureFailures[id, default: 0] >= Self.chromeCaptureAttempts {
+          quarantineChromeCapture(file, reason: error.localizedDescription)
+          chromeCaptureFailures[id] = nil
+        }
+      }
+    }
+  }
+  static let chromeCaptureAttempts = 3
+  private func quarantineChromeCapture(_ file: URL, reason: String) {
+    let failed = root.appendingPathComponent("Inbox/BrowserCaptures/Failed", isDirectory: true)
+    try? FileManager.default.createDirectory(at: failed, withIntermediateDirectories: true)
+    let target = Files.uniqueURL(failed.appendingPathComponent(file.lastPathComponent))
+    try? FileManager.default.moveItem(at: file, to: target)
+    try? Data("\(Date()): \(reason)\n".utf8).write(
+      to: target.deletingPathExtension().appendingPathExtension("reason.txt"))
+  }
+  /// The Chrome helper stages PDFs as Inbox/.Chrome-<uuid>.part. If Chrome kills the helper
+  /// mid-transfer, the stage file is never cleaned up; remove ones older than an hour.
+  private func sweepAbandonedChromeTransfers() {
+    let inbox = root.appendingPathComponent("Inbox")
+    guard let files = try? FileManager.default.contentsOfDirectory(
+      at: inbox, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+    for file in files where file.lastPathComponent.hasPrefix(".Chrome-") && file.pathExtension == "part" {
+      let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+      if Date().timeIntervalSince(modified) > 3600 { try? FileManager.default.removeItem(at: file) }
     }
   }
   @discardableResult public func submitBrowserCapture(_ url: URL) throws -> UUID {

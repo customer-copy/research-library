@@ -120,7 +120,8 @@ public final class SafeRedirectDelegate: NSObject, URLSessionTaskDelegate, @unch
     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
     completionHandler: @escaping (URLRequest?) -> Void
   ) {
-    guard let url = request.url, (try? Identifiers.canonicalURL(url.absoluteString)) != nil else {
+    guard let url = request.url, (try? Identifiers.canonicalURL(url.absoluteString)) != nil,
+      !NetworkSafety.resolvesToNonPublicAddress(url.host ?? "") else {
       completionHandler(nil)
       return
     }
@@ -143,6 +144,10 @@ public actor NativeHTTPTransport: HTTPTransport {
   }
   public func data(_ url: URL) async throws -> (Data, HTTPURLResponse) {
     _ = try Identifiers.canonicalURL(url.absoluteString)
+    // A public-looking name can still point at this Mac or the LAN; check what it resolves to.
+    if let host = url.host, NetworkSafety.resolvesToNonPublicAddress(host) {
+      throw LibraryError.invalid("Local and private network URLs cannot be fetched.")
+    }
     if let cached = cache[url.absoluteString] { return cached }
     for attempt in 0..<3 {
       let delay = max(0, 3 - Date().timeIntervalSince(lastRequest))

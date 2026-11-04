@@ -29,3 +29,12 @@ jobs:
 
       - name: Run tests
         run: Scripts/test.sh
+
+      - name: Test Chrome extension logic
+        run: node Scripts/test-chrome-extension.cjs
+
+      - name: Build and test Chrome native helper
+        run: |
+          mkdir -p Build/ChromeExtension
+          xcrun swiftc -O ChromeExtension/native-host.swift -o Build/ChromeExtension/research-library-chrome-host
+          python3 Scripts/test-chrome-host.py

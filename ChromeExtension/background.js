@@ -18,9 +18,12 @@ function pdfResponse(url) {
 
 function nativeStream() {
   const port = chrome.runtime.connectNative(HOST);
-  let waiting, disconnected = false;
+  let waiting, disconnected = false, sequence = 0;
   port.onMessage.addListener(message => {
     if (!waiting) return;
+    // A reply to an earlier request that already timed out must not answer this one.
+    // (Helpers older than this version send no seq; accept those as before.)
+    if (message?.seq !== undefined && message.seq !== waiting.seq) return;
     const current = waiting; waiting = null; clearTimeout(current.timer);
     if (message?.ok) current.resolve(message);
     else current.reject(new Error(message?.error || 'The PDF transfer failed.'));
@@ -34,9 +37,11 @@ function nativeStream() {
     ask(message) {
       if (disconnected) return Promise.reject(new Error('The local PDF helper disconnected.'));
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => { waiting = null; reject(new Error('The PDF helper did not respond.')); }, 45000);
-        waiting = {resolve, reject, timer};
-        try { port.postMessage(message); } catch (error) { clearTimeout(timer); waiting = null; reject(error); }
+        const seq = ++sequence;
+        const timeout = message.action === 'pdfFinish' ? 180000 : 45000;
+        const timer = setTimeout(() => { waiting = null; reject(new Error('The PDF helper did not respond.')); }, timeout);
+        waiting = {resolve, reject, timer, seq};
+        try { port.postMessage({...message, seq}); } catch (error) { clearTimeout(timer); waiting = null; reject(error); }
       });
     },
     close() { port.disconnect(); }
@@ -122,9 +127,10 @@ async function capture(tab) {
       try { result = await streamPDF(download.response, id); } catch (error) { downloadError = error.message; }
     }
     if (!result) result = await native({action: 'captureFailed', id, error: downloadError});
-    const detail = result.status === 'saved'
+    let detail = result.status === 'saved'
       ? 'PDF and page metadata saved to Research Library.'
       : `Article metadata saved. PDF download needs attention: ${downloadError}`;
+    if (result.appOpened === false) detail += ' Research Library could not be opened; it will import this the next time you open it.';
     await chrome.storage.local.set({lastResult: {ok: true, status: result.status, detail,
       title, date: new Date().toISOString(), downloadError, addedMilliseconds: addedAt - clickedAt, totalMilliseconds: Date.now() - clickedAt}});
     await badge(tab.id, result.status === 'saved' ? '✓' : 'PDF?', detail, result.status === 'saved' ? '#28745a' : '#ad7532');

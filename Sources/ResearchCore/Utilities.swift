@@ -69,7 +69,7 @@ public enum Identifiers {
     {
       throw LibraryError.invalid("Local and private network URLs cannot be fetched.")
     }
-    if host.allSatisfy(\.isNumber)
+    if host.allSatisfy(\.isNumber) || NetworkSafety.isBlockedLiteral(host)
       || (host.contains(":")
         && (host.hasPrefix("fc") || host.hasPrefix("fd") || host.hasPrefix("fe80")))
     {
