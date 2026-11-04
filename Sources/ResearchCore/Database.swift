@@ -108,8 +108,12 @@ public final class LocalDatabase: @unchecked Sendable {
   public var schemaVersion: Int {
     Int((try? rows("PRAGMA user_version"))?.first?["user_version"] ?? "0") ?? 0
   }
+  /// The index schema version this build writes. Each step below runs exactly once, inside a
+  /// transaction, and records its version, so launches don't repeat work (or re-parse every
+  /// item's JSON) and a failed step leaves the previous version intact.
+  public static let currentSchemaVersion = 2
   private func migrate() throws {
-    guard schemaVersion <= 1 else {
+    guard schemaVersion <= Self.currentSchemaVersion else {
       throw LibraryError.database(
         "Local index is from a newer application; rebuild with a compatible version.")
     }
@@ -138,26 +142,31 @@ public final class LocalDatabase: @unchecked Sendable {
           """)
       }
     }
-    try execute(
-      "CREATE TABLE IF NOT EXISTS resource_hash_aliases(hash TEXT PRIMARY KEY, item_id TEXT REFERENCES items(id) ON DELETE CASCADE)"
-    )
-    try execute("CREATE TABLE IF NOT EXISTS import_origins(external_id TEXT PRIMARY KEY, item_id TEXT REFERENCES items(id) ON DELETE CASCADE)")
-    try execute("CREATE INDEX IF NOT EXISTS import_origins_item ON import_origins(item_id)")
-    for column in ["doi", "pmid", "pmcid", "arxiv"] {
-      try execute("CREATE INDEX IF NOT EXISTS items_\(column)_normalized ON items(lower(\(column)))")
-    }
-    try execute("CREATE TABLE IF NOT EXISTS item_fts_lookup(item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE, fts_rowid INTEGER NOT NULL)")
-    try execute("CREATE TABLE IF NOT EXISTS sidecar_revisions(path TEXT PRIMARY KEY, item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE, revision TEXT NOT NULL)")
-    if try rows("SELECT name FROM sqlite_master WHERE name='page_fts_lookup'").isEmpty {
+    if schemaVersion == 1 {
+      // v2: hash aliases, import origins, normalized identifier indexes, FTS rowid lookups,
+      // sidecar revisions; backfills existing rows.
       try transaction {
-        try execute("CREATE TABLE page_fts_lookup(fts_rowid INTEGER PRIMARY KEY, item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE, resource_id TEXT NOT NULL, page INTEGER NOT NULL)")
-        _ = try rows("INSERT INTO page_fts_lookup SELECT p.rowid,p.item_id,p.resource_id,p.page FROM page_fts p JOIN items i ON i.id=p.item_id")
-        try execute("CREATE INDEX page_fts_lookup_item ON page_fts_lookup(item_id,resource_id,page)")
+        try execute(
+          "CREATE TABLE IF NOT EXISTS resource_hash_aliases(hash TEXT PRIMARY KEY, item_id TEXT REFERENCES items(id) ON DELETE CASCADE)"
+        )
+        try execute("CREATE TABLE IF NOT EXISTS import_origins(external_id TEXT PRIMARY KEY, item_id TEXT REFERENCES items(id) ON DELETE CASCADE)")
+        try execute("CREATE INDEX IF NOT EXISTS import_origins_item ON import_origins(item_id)")
+        for column in ["doi", "pmid", "pmcid", "arxiv"] {
+          try execute("CREATE INDEX IF NOT EXISTS items_\(column)_normalized ON items(lower(\(column)))")
+        }
+        try execute("CREATE TABLE IF NOT EXISTS item_fts_lookup(item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE, fts_rowid INTEGER NOT NULL)")
+        try execute("CREATE TABLE IF NOT EXISTS sidecar_revisions(path TEXT PRIMARY KEY, item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE, revision TEXT NOT NULL)")
+        if try rows("SELECT name FROM sqlite_master WHERE name='page_fts_lookup'").isEmpty {
+          try execute("CREATE TABLE page_fts_lookup(fts_rowid INTEGER PRIMARY KEY, item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE, resource_id TEXT NOT NULL, page INTEGER NOT NULL)")
+          _ = try rows("INSERT INTO page_fts_lookup SELECT p.rowid,p.item_id,p.resource_id,p.page FROM page_fts p JOIN items i ON i.id=p.item_id")
+          try execute("CREATE INDEX page_fts_lookup_item ON page_fts_lookup(item_id,resource_id,page)")
+        }
+        try execute("CREATE INDEX IF NOT EXISTS chunks_resource_pages ON chunks(item_id,resource_id,start_page,end_page)")
+        _ = try rows("INSERT OR IGNORE INTO item_fts_lookup SELECT item_id, rowid FROM item_fts")
+        _ = try rows("INSERT OR IGNORE INTO import_origins SELECT origin.value, i.id FROM items i, json_each(i.json, '$.importedIDs') origin")
+        try execute("PRAGMA user_version=2")
       }
     }
-    try execute("CREATE INDEX IF NOT EXISTS chunks_resource_pages ON chunks(item_id,resource_id,start_page,end_page)")
-    _ = try rows("INSERT OR IGNORE INTO item_fts_lookup SELECT item_id, rowid FROM item_fts")
-    _ = try rows("INSERT OR IGNORE INTO import_origins SELECT origin.value, i.id FROM items i, json_each(i.json, '$.importedIDs') origin")
   }
   public func upsert(_ item: LibraryItem) throws {
     try transaction {

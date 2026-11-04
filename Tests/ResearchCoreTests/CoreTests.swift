@@ -282,9 +282,9 @@ struct FixedProvider: MetadataProvider {
   @Test func testMigrationsAndForeignKeys() throws {
     let url = temp.appendingPathComponent("db.sqlite")
     let db = try LocalDatabase(url: url)
-    expectEqual(db.schemaVersion, 1)
+    expectEqual(db.schemaVersion, LocalDatabase.currentSchemaVersion)
     expectEqual(try db.rows("PRAGMA foreign_keys").first?["foreign_keys"], "1")
-    expectEqual(try LocalDatabase(url: url).schemaVersion, 1)
+    expectEqual(try LocalDatabase(url: url).schemaVersion, LocalDatabase.currentSchemaVersion)
     expectThrows(try db.rows("INSERT INTO resources VALUES('r','unknown','h','p','pdf')"))
   }
   @Test func testTransactionsRollback() throws {

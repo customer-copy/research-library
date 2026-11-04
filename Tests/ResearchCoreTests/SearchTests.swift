@@ -167,6 +167,7 @@ extension CoreTests {
       text: "Microglia evidence", method: "fixture")
     try db.index(pages: [page], sections: [], chunks: [], itemID: item.id, resourceID: resource)
     try db.execute("DROP TABLE page_fts_lookup")
+    try db.execute("PRAGMA user_version=1")  // simulate an index from before the lookup table
     let migrated = try LocalDatabase(url: file)
     #expect(try migrated.rows("SELECT * FROM page_fts_lookup").count == 1)
     #expect(try migrated.search("microglia").first?.item.id == item.id)

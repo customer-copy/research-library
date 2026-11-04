@@ -308,3 +308,169 @@ public enum PortableJSON {
     return d
   }
 }
+
+// MARK: - Tolerant decoding
+
+// Metadata files outlive app versions. A field that a newer build added (or an older build
+// never wrote) must not make a whole paper unreadable, so every property that has a default
+// in the model falls back to it when absent. Required identity fields stay required.
+extension KeyedDecodingContainer {
+  func value<T: Decodable>(_ key: Key, or fallback: @autoclosure () -> T) throws -> T {
+    try decodeIfPresent(T.self, forKey: key) ?? fallback()
+  }
+}
+extension Author {
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    id = try c.value(.id, or: UUID() as UUID)
+    givenName = try c.value(.givenName, or: "" as String)
+    middleName = try c.value(.middleName, or: "" as String)
+    familyName = try c.value(.familyName, or: "" as String)
+    suffix = try c.value(.suffix, or: "" as String)
+    orcid = try c.decodeIfPresent(String.self, forKey: .orcid)
+  }
+}
+extension Authorship {
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    authorID = try c.decode(UUID.self, forKey: .authorID)
+    order = try c.decode(Int.self, forKey: .order)
+    role = try c.value(.role, or: "author" as String)
+  }
+}
+extension Resource {
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    id = try c.value(.id, or: UUID() as UUID)
+    itemID = try c.decode(UUID.self, forKey: .itemID)
+    type = try c.decode(ResourceType.self, forKey: .type)
+    remoteURL = try c.decodeIfPresent(String.self, forKey: .remoteURL)
+    relativePath = try c.decodeIfPresent(String.self, forKey: .relativePath)
+    mimeType = try c.decodeIfPresent(String.self, forKey: .mimeType)
+    sha256 = try c.decodeIfPresent(String.self, forKey: .sha256)
+    originalSHA256 = try c.decodeIfPresent(String.self, forKey: .originalSHA256)
+    availability = try c.decode(Availability.self, forKey: .availability)
+    source = try c.value(.source, or: "user" as String)
+    dateAdded = try c.value(.dateAdded, or: Date() as Date)
+    primary = try c.value(.primary, or: false as Bool)
+  }
+}
+extension MetadataSnapshot {
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    source = try c.decode(String.self, forKey: .source)
+    retrievedAt = try c.value(.retrievedAt, or: Date() as Date)
+    format = try c.decode(String.self, forKey: .format)
+    payload = try c.decode(String.self, forKey: .payload)
+  }
+}
+extension LibraryItem {
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    id = try c.decode(UUID.self, forKey: .id)
+    type = try c.value(.type, or: .journalArticle as ItemType)
+    title = try c.value(.title, or: "Untitled" as String)
+    subtitle = try c.value(.subtitle, or: "" as String)
+    abstract = try c.value(.abstract, or: "" as String)
+    publicationDate = try c.decodeIfPresent(String.self, forKey: .publicationDate)
+    year = try c.decodeIfPresent(Int.self, forKey: .year)
+    journal = try c.value(.journal, or: "" as String)
+    volume = try c.value(.volume, or: "" as String)
+    issue = try c.value(.issue, or: "" as String)
+    pages = try c.value(.pages, or: "" as String)
+    doi = try c.decodeIfPresent(String.self, forKey: .doi)
+    pmid = try c.decodeIfPresent(String.self, forKey: .pmid)
+    pmcid = try c.decodeIfPresent(String.self, forKey: .pmcid)
+    arxivID = try c.decodeIfPresent(String.self, forKey: .arxivID)
+    canonicalURL = try c.decodeIfPresent(String.self, forKey: .canonicalURL)
+    citationKey = try c.value(.citationKey, or: "" as String)
+    dateAdded = try c.value(.dateAdded, or: Date.distantPast as Date)
+    dateModified = try c.value(.dateModified, or: Date.distantPast as Date)
+    favorite = try c.value(.favorite, or: false as Bool)
+    read = try c.value(.read, or: false as Bool)
+    confidence = try c.value(.confidence, or: 0.2 as Double)
+    provenance = try c.value(.provenance, or: [] as [Provenance])
+    notes = try c.value(.notes, or: "" as String)
+    tags = try c.value(.tags, or: [] as [String])
+    collections = try c.value(.collections, or: [] as [String])
+    authors = try c.value(.authors, or: [] as [Author])
+    authorships = try c.value(.authorships, or: [] as [Authorship])
+    resources = try c.value(.resources, or: [] as [Resource])
+    humanEdited = try c.value(.humanEdited, or: false as Bool)
+    publisher = try c.decodeIfPresent(String.self, forKey: .publisher)
+    language = try c.decodeIfPresent(String.self, forKey: .language)
+    issn = try c.decodeIfPresent([String].self, forKey: .issn)
+    isbn = try c.decodeIfPresent([String].self, forKey: .isbn)
+    keywords = try c.decodeIfPresent([String].self, forKey: .keywords)
+    licenseURLs = try c.decodeIfPresent([String].self, forKey: .licenseURLs)
+    sourceMetadata = try c.decodeIfPresent([MetadataSnapshot].self, forKey: .sourceMetadata)
+    importedIDs = try c.decodeIfPresent([String].self, forKey: .importedIDs)
+    pdfFilenameHints = try c.decodeIfPresent([String].self, forKey: .pdfFilenameHints)
+    pdfLookup = try c.decodeIfPresent(PDFLookup.self, forKey: .pdfLookup)
+  }
+}
+extension IngestionRequest {
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    id = try c.decode(UUID.self, forKey: .id)
+    createdAt = try c.value(.createdAt, or: Date() as Date)
+    source = try c.value(.source, or: "manual" as String)
+    sourceDevice = try c.decodeIfPresent(String.self, forKey: .sourceDevice)
+    inputURL = try c.decodeIfPresent(String.self, forKey: .inputURL)
+    inputFile = try c.decodeIfPresent(String.self, forKey: .inputFile)
+    inboxCleanupComplete = try c.decodeIfPresent(Bool.self, forKey: .inboxCleanupComplete)
+    importCommit = try c.decodeIfPresent(ImportCommitCheckpoint.self, forKey: .importCommit)
+    inputText = try c.decodeIfPresent(String.self, forKey: .inputText)
+    doi = try c.decodeIfPresent(String.self, forKey: .doi)
+    pmid = try c.decodeIfPresent(String.self, forKey: .pmid)
+    suggestedTitle = try c.decodeIfPresent(String.self, forKey: .suggestedTitle)
+    titleIsFilename = try c.decodeIfPresent(Bool.self, forKey: .titleIsFilename)
+    suggestedCollection = try c.decodeIfPresent(String.self, forKey: .suggestedCollection)
+    suggestedTags = try c.value(.suggestedTags, or: [] as [String])
+    note = try c.value(.note, or: "" as String)
+    state = try c.value(.state, or: .discovered as IngestionState)
+    error = try c.decodeIfPresent(String.self, forKey: .error)
+    retryCount = try c.value(.retryCount, or: 0 as Int)
+    resultID = try c.decodeIfPresent(UUID.self, forKey: .resultID)
+    candidateID = try c.decodeIfPresent(UUID.self, forKey: .candidateID)
+    duplicateChoice = try c.value(.duplicateChoice, or: .automatic as DuplicateChoice)
+  }
+}
+
+// A value from a newer app version decodes to a safe fallback instead of failing the file.
+extension ItemType {
+  public init(from decoder: Decoder) throws {
+    let raw = try decoder.singleValueContainer().decode(String.self)
+    self = ItemType(rawValue: raw) ?? .genericDocument
+  }
+}
+extension ResourceType {
+  public init(from decoder: Decoder) throws {
+    let raw = try decoder.singleValueContainer().decode(String.self)
+    self = ResourceType(rawValue: raw) ?? .other
+  }
+}
+extension Availability {
+  public init(from decoder: Decoder) throws {
+    let raw = try decoder.singleValueContainer().decode(String.self)
+    self = Availability(rawValue: raw) ?? .unavailable
+  }
+}
+extension PDFLookupStatus {
+  public init(from decoder: Decoder) throws {
+    let raw = try decoder.singleValueContainer().decode(String.self)
+    self = PDFLookupStatus(rawValue: raw) ?? .needsReview
+  }
+}
+extension IngestionState {
+  public init(from decoder: Decoder) throws {
+    let raw = try decoder.singleValueContainer().decode(String.self)
+    self = IngestionState(rawValue: raw) ?? .awaitingReview
+  }
+}
+extension DuplicateChoice {
+  public init(from decoder: Decoder) throws {
+    let raw = try decoder.singleValueContainer().decode(String.self)
+    self = DuplicateChoice(rawValue: raw) ?? .automatic
+  }
+}

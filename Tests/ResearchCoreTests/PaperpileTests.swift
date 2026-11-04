@@ -426,6 +426,7 @@ actor LookupFixtureTransport: HTTPTransport {
     try database.upsert(item)
     #expect(try database.rows("SELECT count(*) AS count FROM item_fts_lookup")[0]["count"] == "1")
     try database.execute("DROP TABLE item_fts_lookup")
+    try database.execute("PRAGMA user_version=1")  // simulate an index from before the lookup table
     let migrated = try LocalDatabase(url: url)
     #expect(try migrated.rows("SELECT count(*) AS count FROM item_fts_lookup")[0]["count"] == "1")
     item.title = "Replacement searchable title"
