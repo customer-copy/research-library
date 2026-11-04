@@ -159,11 +159,31 @@ public enum Files {
       throw LibraryError.invalid("Unsafe attachment path")
     }
     let root = root.resolvingSymlinksInPath().standardizedFileURL
-    let url = root.appendingPathComponent(relative).resolvingSymlinksInPath().standardizedFileURL
+    let url = try resolvingExistingAncestors(root.appendingPathComponent(relative))
     guard url.path.hasPrefix(root.path + "/") else {
       throw LibraryError.invalid("Attachment escapes library")
     }
     return url
+  }
+  /// `resolvingSymlinksInPath()` leaves a path unresolved when its last components do not
+  /// exist yet, so a symlinked folder (for example Inbox -> /elsewhere) could slip past a
+  /// prefix check before a new file is written into it. Resolve the deepest component that
+  /// exists (without following a final symlink), then re-append the rest.
+  static func resolvingExistingAncestors(_ url: URL) throws -> URL {
+    var existing = url.standardizedFileURL
+    var missing: [String] = []
+    while (try? FileManager.default.attributesOfItem(atPath: existing.path)) == nil,
+      existing.pathComponents.count > 1 {
+      missing.insert(existing.lastPathComponent, at: 0)
+      existing = existing.deletingLastPathComponent()
+    }
+    var resolved = existing.resolvingSymlinksInPath().standardizedFileURL
+    if !missing.isEmpty,
+      (try? FileManager.default.attributesOfItem(atPath: resolved.path)[.type] as? FileAttributeType) == .typeSymbolicLink {
+      throw LibraryError.invalid("Attachment escapes library")  // dangling symlink
+    }
+    for component in missing { resolved.appendPathComponent(component) }
+    return resolved.standardizedFileURL
   }
   public static func materialize(_ url: URL) throws {
     if hasResidentData(url) { return }

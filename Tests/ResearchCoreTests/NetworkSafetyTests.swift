@@ -43,3 +43,19 @@ import Testing
     #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("Failed/\(id.uuidString.lowercased()).json").path))
   }
 }
+
+extension NetworkSafetyTests {
+  @Test func symlinkedFolderCannotRedirectNewFilesOutsideLibrary() throws {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent("SafeURL-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: base) }
+    let root = base.appendingPathComponent("Library"), outside = base.appendingPathComponent("Outside")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+    try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("Inbox"), withDestinationURL: outside)
+    #expect(throws: LibraryError.self) { try Files.safeURL(root: root, relative: "Inbox/new.pdf") }
+    #expect(throws: LibraryError.self) { try Files.safeURL(root: root, relative: "Inbox/Sub/new.pdf") }
+    try FileManager.default.createDirectory(at: root.appendingPathComponent("PDFs"), withIntermediateDirectories: true)
+    let inside = try Files.safeURL(root: root, relative: "PDFs/Sub/new.pdf")
+    #expect(inside.path.hasSuffix("/Library/PDFs/Sub/new.pdf"))
+  }
+}

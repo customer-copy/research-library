@@ -109,11 +109,25 @@ func openApp(_ capture: URL? = nil) -> Bool {
   catch { return false }
 }
 
+/// Resolves the deepest existing ancestor (symlinks in not-yet-created paths are otherwise
+/// left unresolved), then re-appends the missing components.
+func resolvingExistingAncestors(_ url: URL) -> URL {
+  var existing = url.standardizedFileURL
+  var missing: [String] = []
+  while (try? FileManager.default.attributesOfItem(atPath: existing.path)) == nil, existing.pathComponents.count > 1 {
+    missing.insert(existing.lastPathComponent, at: 0)
+    existing = existing.deletingLastPathComponent()
+  }
+  var resolved = existing.resolvingSymlinksInPath().standardizedFileURL
+  for component in missing { resolved.appendPathComponent(component) }
+  return resolved.standardizedFileURL
+}
+
 func envelopeURL(root: URL, id: String) throws -> URL {
   let relative = "Inbox/BrowserCaptures/\(id.lowercased()).json"
   let base = root.resolvingSymlinksInPath().standardizedFileURL.path
   let url = URL(fileURLWithPath: base, isDirectory: true).appendingPathComponent(relative)
-  guard url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(base + "/") else {
+  guard resolvingExistingAncestors(url).path.hasPrefix(base + "/") else {
     throw HostError.invalid("Browser captures must stay inside the selected library.")
   }
   return url
