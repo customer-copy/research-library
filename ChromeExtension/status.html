@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Save to Research Library</title><link rel="stylesheet" href="status.css"></head>
+<body><main><img src="icons/icon128.png" width="64" height="64" alt="">
+<h1>Save to Research Library</h1>
+<p>Open an article page or PDF in Chrome and click the book icon. The extension finds the main PDF and captures the page’s citation metadata.</p>
+<p id="destination" aria-live="polite">Checking your Inbox…</p>
+<section id="result" hidden aria-live="polite"><h2>Last save</h2><p id="detail"></p><p id="paper"></p></section>
+<details id="setup"><summary>Setup and troubleshooting</summary><ol>
+<li>Open the Research Library Mac app and select your library folder.</li>
+<li>Run <strong>Install Chrome Helper.command</strong> from this extension’s folder.</li>
+<li>Pin <strong>Save to Research Library</strong> using Chrome’s Extensions menu.</li>
+</ol></details>
+<p><strong>↓</strong> means the article metadata has been handed to the app and the PDF is downloading. <strong>✓</strong> means the PDF has reached Inbox and the app has been notified to attach it immediately. Text indexing continues in the background.</p>
+<p><strong>PDF?</strong> means the metadata was retained but the PDF download needs attention. The app shows the download issue. Publisher access restrictions still apply. Streaming supports PDFs up to 512 MB; download time depends on the publisher and connection.</p>
+<p class="privacy">This extension uses a local Mac helper. It has no cloud service and reads a page only when you click its icon. It uses your browser session when fetching that PDF; it does not extract or send cookies to the helper.</p>
+</main><script src="status.js"></script></body></html>

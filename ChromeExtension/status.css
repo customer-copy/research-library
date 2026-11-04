@@ -1,0 +1,7 @@
+:root { color-scheme: light dark; font: 16px/1.6 system-ui, sans-serif; }
+body { margin: 0; background: light-dark(#f4f6f5, #18201e); color: light-dark(#21332c, #e2e9e5); }
+main { max-width: 650px; margin: 48px auto; padding: 40px; border-radius: 20px; background: light-dark(white, #222d29); }
+h1 { font-size: 28px; line-height: 1.2; } h2 { font-size: 18px; margin-top: 28px; }
+li { margin: 12px 0; } section { padding: 1px 20px; border-left: 3px solid #418465; background: light-dark(#eef5f0, #293e31); }
+section.error { border-color: #b94e45; } .privacy { font-size: 14px; opacity: .75; margin-top: 32px; }
+@media(max-width: 720px) { main { margin: 16px; padding: 24px; } }

@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Save to Research Library",
+  "version": "1.1.0",
+  "description": "One click finds an article’s PDF, captures citation metadata, and saves to Research Library on this Mac.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxg12zBaUmEd5pHC1UzDAKYnxBSDW27ZcWXQP2JLEYatA1RZgQCW5M/3ap5ZCnCanqKJx6ptKRmV04SgvQX3W+92GO8iZa1N+FKEq9Dq8tgf2XW77EvwmTb48i0k9kOMLoSNp2HONIZvQwM1cReAviSkJXSXjnR/r75/fAVKRhpC0t//GQI5mD2Sn2exYmsftoqXZqOHvhTRVzeRXwFTW+/oT0Wj3Fdcyv0LloZ6R+JrBiF54EESTmnBif45LR6/KdPWax9y8rv6UoC0ye8kSZax2uTkktJxy45OXGtm2Thu6D1zLf9EJefEzLkADL5cntnvBqjC+o5ccWIOFR2mDnQIDAQAB",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "nativeMessaging",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Save PDF to Research Library",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "options_ui": {
+    "page": "status.html",
+    "open_in_tab": true
+  }
+}

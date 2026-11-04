@@ -1,0 +1,4 @@
+# Future source-grounded retrieval
+RetrievalService accepts query, filters and limit and returns item UUID, resource UUID, optional chunk UUID, score, snippet, pages and section. SemanticIndex can later combine vector candidates with FTS candidates, followed by reranking. Embedding metadata records provider/model/dimensions/version without changing authoritative sidecars. No embedding provider runs in V1.
+
+A future answer engine must request chunks from the local index and cite item/authors/year/title/resource/pages/section. The PDF viewer opens the exact resource/page. Models may be local, Apple Foundation Models, or a user-selected remote vendor. Explicit consent would be required before sending document content to remote models. AI summaries remain derived. Rebuilding or removing any semantic index must never affect notes or original research data.

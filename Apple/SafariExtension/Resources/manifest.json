@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Save to Research Library",
+  "description": "Send articles and PDF links to Research Library from Safari or Google search results.",
+  "version": "1.0.0",
+  "icons": {"48": "icon.svg", "128": "icon.svg"},
+  "permissions": ["activeTab", "scripting", "nativeMessaging"],
+  "background": {"scripts": ["background.js"]},
+  "action": {"default_title": "Save to Research Library", "default_popup": "popup.html", "default_icon": "icon.svg"},
+  "content_scripts": [{
+    "matches": ["https://www.google.com/search*", "https://www.google.co.uk/search*", "https://www.google.ca/search*", "https://www.google.com.au/search*", "https://www.google.de/search*", "https://www.google.fr/search*", "https://www.google.co.in/search*", "https://www.google.co.jp/search*"],
+    "js": ["capture.js", "google.js"],
+    "run_at": "document_idle"
+  }]
+}

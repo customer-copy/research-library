@@ -1,0 +1,10 @@
+# Local database (schema 1)
+SQLite lives in Application Support/ResearchLibrary/<library-path-hash>/index.sqlite. WAL, foreign keys and a busy timeout are enabled. user_version migrations run in a transaction.
+
+All tables are derived: items (UUID primary key, JSON metadata plus indexed scalar filters), authors, item_authors (ordered FK), resources (FK with SHA index), tags, collections, item_tags, item_collections, pages (item/resource/page), sections, chunks, and item_fts/page_fts virtual FTS5 tables. Relationships cascade from items. FTS title weight is greater than body weight; metadata and page search are combined by RetrievalService. Metadata queries are bounded and filtered in SQL. Embedding metadata has a reserved table; no vectors or AI calls are made.
+
+Metadata/<UUID>.json schemaVersion 1 is authoritative. Dates use ISO8601. The item object contains normalized author records and ordered authorship links, resources, user tags/collections/notes, provenance, and bibliographic identifiers. Large text and chunks never enter a sidecar. Newer/unknown object keys are preserved recursively on saving; unsupported newer schemas are reported for review. Index reconstruction reads these files independently of SQLite.
+
+The derived sidecar_revisions table records a metadata path, owning item UUID (cascading foreign key) and a JSON filesystem revision. Revisions include inode, size, modification/change timestamps and flags. They permit unchanged local sidecars to bypass parsing on restart. This additive cache table is created for existing schema-1 indexes; it contains no authoritative data and is cleared by index reset/item deletion.
+
+Search has a separate read-only WAL connection and cancellable statements. page_fts_lookup(fts_rowid primary key, item_id cascading FK, resource_id, page) provides a composite lookup by article/resource/page; existing indexes backfill it once when the table is introduced. chunks_resource_pages indexes citation joins. Article search deduplicates matches before pagination and computes snippets/citation details only for selected articles. All phases of a search share one SQLite read snapshot.

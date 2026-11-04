@@ -1,0 +1,26 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "Save to ${applicationName}": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save to ${applicationName}"
+          }
+        }
+      }
+    },
+    "Add to ${applicationName}": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add to ${applicationName}"
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}
