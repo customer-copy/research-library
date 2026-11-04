@@ -21,7 +21,8 @@ private final class Counter: @unchecked Sendable {
     try pdf.write(to: source.appendingPathComponent("PDFs/2021 - Lovelace - Engines.pdf"))
     var item = LibraryItem(title: "Engines")
     var resource = Resource(itemID: item.id, type: .pdf, path: "PDFs/2021 - Lovelace - Engines.pdf", availability: .local)
-    resource.sha256 = recordedHash ?? (try Files.hash(source.appendingPathComponent("PDFs/2021 - Lovelace - Engines.pdf")))
+    let actualHash = try Files.hash(source.appendingPathComponent("PDFs/2021 - Lovelace - Engines.pdf"))
+    resource.sha256 = recordedHash ?? actualHash
     item.resources = [resource]
     try sidecars.save(item)
     try FileManager.default.createDirectory(at: source.appendingPathComponent("Metadata/OpenAlex"), withIntermediateDirectories: true)
