@@ -52,7 +52,7 @@ public enum LibraryMigration {
     try Data("source\t\(source.path)\nstarted\t\(Date())\n".utf8)
       .write(to: state.appendingPathComponent("info.txt"), options: .atomic)
 
-    let files = try enumerateFiles(source)
+    var files = try enumerateFiles(source)
     var report = LibraryMigrationReport(totalFiles: files.count)
     var status = LibraryMigrationProgress(
       totalFiles: files.count, totalBytes: files.reduce(0) { $0 + $1.size })
@@ -61,7 +61,12 @@ public enum LibraryMigration {
     defer { try? manifest.close() }
     try manifest.seekToEnd()
 
-    for file in files {
+    // Files can keep arriving while a long copy runs (a browser capture, an iCloud sync).
+    // After the main pass, sweep again for anything new, a few times, until nothing is left.
+    var pending = files
+    var sweeps = 0
+    while !pending.isEmpty {
+    for file in pending {
       try Task.checkCancellation()
       status.currentFile = file.relative
       let target = destination.appendingPathComponent(file.relative)
@@ -89,6 +94,15 @@ public enum LibraryMigration {
       status.bytesDone += file.size
       progress(status)
       if status.filesDone % 25 == 0 { await Task.yield() }
+    }
+    sweeps += 1
+    guard sweeps <= 3 else { break }
+    let known = Set(files.map(\.relative))
+    pending = try enumerateFiles(source).filter { !known.contains($0.relative) }
+    files += pending
+    report.totalFiles = files.count
+    status.totalFiles = files.count
+    status.totalBytes += pending.reduce(0) { $0 + $1.size }
     }
 
     // Every source file must be present in the destination with its verified size.

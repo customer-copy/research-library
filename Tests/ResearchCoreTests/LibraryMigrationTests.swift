@@ -142,3 +142,20 @@ private final class Counter: @unchecked Sendable {
     #expect(FileManager.default.fileExists(atPath: inbox.appendingPathComponent("Inbox/Rejected/\(request.id.uuidString).json").path))
   }
 }
+
+extension LibraryMigrationTests {
+  @Test func filesArrivingDuringTheCopyAreIncluded() async throws {
+    defer { try? FileManager.default.removeItem(at: base) }
+    _ = try makeSource()
+    let late = source.appendingPathComponent("Inbox/arrived-during-move.pdf")
+    let calls = Counter()
+    let report = try await LibraryMigration.copyLibrary(from: source, to: destination, reserveBytes: 0,
+      availableBytes: { _ in
+        // Simulate a capture landing in the old Inbox partway through the copy.
+        if calls.next() == 2 { try? Data("%PDF late".utf8).write(to: late) }
+        return 1 << 40
+      })
+    #expect(report.isComplete)
+    #expect(try Data(contentsOf: destination.appendingPathComponent("Inbox/arrived-during-move.pdf")) == Data("%PDF late".utf8))
+  }
+}

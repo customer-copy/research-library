@@ -283,8 +283,15 @@ typealias ViewState<Value> = SwiftUI.State<Value>
     panel.prompt = "Use for iPhone Capture"
     panel.message = "Choose or create a folder in iCloud Drive, such as “Research Library Inbox”. Pick the same folder in the iPhone capture app."
     guard panel.runModal() == .OK, let url = panel.url else { return }
-    if let root, url.standardizedFileURL.path == root.standardizedFileURL.path {
-      message = "Choose a separate folder, not the library itself."; return
+    let chosen = url.resolvingSymlinksInPath().standardizedFileURL.path
+    if let root {
+      let library = root.resolvingSymlinksInPath().standardizedFileURL.path
+      if chosen == library || chosen.hasPrefix(library + "/") {
+        message = "Choose a folder in iCloud Drive outside the library (for example “Research Library Inbox”). The library's own Inbox already collects Mac captures."; return
+      }
+    }
+    if !chosen.contains("/Library/Mobile Documents/") {
+      message = "Your iPhone can only reach folders in iCloud Drive. Choose or create a folder in iCloud Drive."; return
     }
     do {
       try CaptureInbox.store(url)
