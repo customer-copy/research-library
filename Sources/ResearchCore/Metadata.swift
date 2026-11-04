@@ -7,6 +7,13 @@ public protocol MetadataProvider: Sendable {
 public protocol HTTPTransport: Sendable {
   func data(_ url: URL) async throws -> (Data, HTTPURLResponse)
 }
+/// A non-2xx HTTP response. The description keeps the historical "HTTP <code>" text so
+/// callers that inspect messages (for example 401/403 access checks) behave as before.
+public struct HTTPStatusError: Error, LocalizedError, Sendable {
+  public let statusCode: Int
+  public init(statusCode: Int) { self.statusCode = statusCode }
+  public var errorDescription: String? { "HTTP \(statusCode)" }
+}
 public struct BioRxivProvider: MetadataProvider {
   public let transport: any HTTPTransport
   public let server: String
@@ -157,7 +164,7 @@ public actor NativeHTTPTransport: HTTPTransport {
         continue
       }
       guard (200..<300).contains(http.statusCode) else {
-        throw LibraryError.invalid("HTTP \(http.statusCode)")
+        throw HTTPStatusError(statusCode: http.statusCode)
       }
       if data.count < 2 * 1024 * 1024 { cache[url.absoluteString] = (data, http) }
       return (data, http)

@@ -261,12 +261,25 @@ typealias ViewState<Value> = SwiftUI.State<Value>
       do {
         let items = try await library.dashboardItems()
         var matched: [OpenAlexWorkRecord] = []
+        var failed = 0, consecutiveFailures = 0, updated = 0
+        var lastError: Error?
         let client = OpenAlexClient(apiKey: key)
         for (index, item) in items.enumerated() {
           try Task.checkCancellation()
-          if let record = try await client.work(for: item) {
-            try await library.mergeOpenAlex(record, into: item.id)
-            matched.append(record)
+          // One bad record must not stop the whole sync. Repeated consecutive failures
+          // (offline, invalid key, provider outage) do stop it, so it doesn't grind on.
+          do {
+            if let record = try await client.work(for: item) {
+              if try await library.mergeOpenAlex(record, into: item.id) { updated += 1 }
+              matched.append(record)
+            }
+            consecutiveFailures = 0
+          } catch is CancellationError { throw CancellationError() }
+          catch {
+            failed += 1; consecutiveFailures += 1; lastError = error
+            if consecutiveFailures >= 5 {
+              throw LibraryError.invalid("Stopped after 5 failures in a row (\(error.localizedDescription)). \(matched.count) matched so far.")
+            }
           }
           if index % 10 == 0 { dashboardStatus = "Syncing metadata… \(index)/\(items.count)" }
         }
@@ -275,7 +288,8 @@ typealias ViewState<Value> = SwiftUI.State<Value>
         let url = root.appendingPathComponent("Metadata/OpenAlex/dashboard.json")
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try PortableJSON.encoder().encode(snapshot).write(to: url, options: .atomic)
-        dashboardSnapshot = snapshot; dashboardSummary = summary; dashboardItems = try await library.dashboardItems(); dashboardStatus = "Synced \(matched.count) OpenAlex records."
+        dashboardSnapshot = snapshot; dashboardSummary = summary; dashboardItems = try await library.dashboardItems(); dashboardStatus = "Synced \(matched.count) OpenAlex records (\(updated) updated)."
+          + (failed > 0 ? " \(failed) could not be checked\(lastError.map { ": " + $0.localizedDescription } ?? "")." : "")
       } catch is CancellationError { dashboardStatus = "OpenAlex sync paused." }
       catch { dashboardStatus = "OpenAlex sync failed: \(error.localizedDescription)" }
       dashboardBusy = false

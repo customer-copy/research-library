@@ -138,25 +138,36 @@ public struct OpenAlexClient: Sendable {
     guard let result = components.url else { throw LibraryError.invalid("Invalid OpenAlex request") }
     return result
   }
+  /// Fetches a URL, treating "not found" as a normal empty answer rather than an error.
+  private func fetch(_ url: URL) async throws -> (Data, HTTPURLResponse)? {
+    do {
+      let (data, response) = try await transport.data(url)
+      if response.statusCode == 404 { return nil }
+      guard (200..<300).contains(response.statusCode) else {
+        throw HTTPStatusError(statusCode: response.statusCode)
+      }
+      return (data, response)
+    } catch let error as HTTPStatusError where error.statusCode == 404 {
+      return nil
+    }
+  }
+  /// Looks up the OpenAlex work for a library item.
+  ///
+  /// - With a DOI: exact DOI lookup only. An unknown DOI returns nil; it never falls back
+  ///   to a title search, because a DOI that OpenAlex lacks is not evidence of another work.
+  /// - Without a DOI: a title search, accepted only under `OpenAlexMatch.bestTitleMatch`.
   public func work(for item: LibraryItem) async throws -> OpenAlexWorkRecord? {
     if let doi = item.doi?.trimmingCharacters(in: .whitespacesAndNewlines), !doi.isEmpty {
       let encoded = doi.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? doi
-      let (data, response) = try await transport.data(try url(path: "works/https://doi.org/\(encoded)"))
-      if response.statusCode == 404 { return nil }
-      guard (200..<300).contains(response.statusCode) else { throw LibraryError.invalid("OpenAlex request failed (HTTP \(response.statusCode))") }
-      return try OpenAlexWorkRecord.decode(data)
+      guard let response = try await fetch(try url(path: "works/https://doi.org/\(encoded)")) else { return nil }
+      return try OpenAlexWorkRecord.decode(response.0)
     }
-    guard !item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-    let (data, response) = try await transport.data(try url(path: "works", query: ["search": item.title, "per-page": "5"]))
-    guard (200..<300).contains(response.statusCode), let root = try JSONSerialization.jsonObject(with: data) as? [String: Any], let results = root["results"] as? [[String: Any]] else { return nil }
-    let normalized = item.title.lowercased().filter { $0.isLetter || $0.isNumber || $0 == " " }
-    for value in results {
-      let candidate = (value["title"] as? String ?? "").lowercased().filter { $0.isLetter || $0.isNumber || $0 == " " }
-      if candidate == normalized || candidate.contains(normalized) || normalized.contains(candidate) {
-        return try OpenAlexWorkRecord.decode(try JSONSerialization.data(withJSONObject: value))
-      }
-    }
-    return nil
+    guard !OpenAlexMatch.normalizedTitle(item.title).isEmpty else { return nil }
+    guard let response = try await fetch(try url(path: "works", query: ["search": item.title, "per-page": "10"])),
+      let root = try JSONSerialization.jsonObject(with: response.0) as? [String: Any],
+      let results = root["results"] as? [[String: Any]],
+      let match = OpenAlexMatch.bestTitleMatch(for: item, in: results) else { return nil }
+    return try OpenAlexWorkRecord.decode(try JSONSerialization.data(withJSONObject: match))
   }
   public func recentWorks(search: String?, from date: String, limit: Int = 20) async throws -> [OpenAlexWorkRecord] {
     var query = ["filter": "from_publication_date:\(date)", "sort": "publication_date:desc", "per-page": String(min(max(limit, 1), 100))]
@@ -164,5 +175,91 @@ public struct OpenAlexClient: Sendable {
     let (data, response) = try await transport.data(try url(path: "works", query: query))
     guard (200..<300).contains(response.statusCode), let root = try JSONSerialization.jsonObject(with: data) as? [String: Any], let results = root["results"] as? [[String: Any]] else { throw LibraryError.invalid("OpenAlex feed request failed (HTTP \(response.statusCode))") }
     return try results.map { try OpenAlexWorkRecord.decode(try JSONSerialization.data(withJSONObject: $0)) }
+  }
+}
+
+
+/// Strict rules for accepting an OpenAlex title-search result as the same work.
+public enum OpenAlexMatch {
+  /// Lowercased, diacritic-folded, tag-stripped title keeping only letters and digits,
+  /// with runs of whitespace collapsed.
+  public static func normalizedTitle(_ title: String) -> String {
+    let stripped = title.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+    let folded = stripped.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+    let kept = folded.map { $0.isLetter || $0.isNumber ? $0 : " " }
+    return String(kept).split(separator: " ").joined(separator: " ")
+  }
+  static func folded(_ value: String) -> String {
+    value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+  }
+  /// Accepts a candidate only when all of these hold:
+  /// 1. Its normalized title equals the item's (no substring matches; empty titles never match).
+  /// 2. At least one corroborating field is checked: the year (within one year, for
+  ///    preprint/print gaps) and/or the first author's family name among the first
+  ///    three OpenAlex authors. If the item has neither, nothing is accepted.
+  /// 3. Exactly one candidate passes; ambiguous results are rejected.
+  public static func bestTitleMatch(for item: LibraryItem, in results: [[String: Any]]) -> [String: Any]? {
+    let title = normalizedTitle(item.title)
+    guard title.count >= 10 else { return nil }
+    let family = folded(item.authors.first?.familyName ?? "").trimmingCharacters(in: .whitespaces)
+    guard item.year != nil || !family.isEmpty else { return nil }
+    let passing = results.filter { candidate in
+      guard normalizedTitle(candidate["title"] as? String ?? "") == title else { return false }
+      if let year = item.year {
+        guard let candidateYear = candidate["publication_year"] as? Int, abs(candidateYear - year) <= 1 else { return false }
+      }
+      if !family.isEmpty {
+        let names = (candidate["authorships"] as? [[String: Any]] ?? []).prefix(3).compactMap {
+          ($0["author"] as? [String: Any])?["display_name"] as? String
+        }
+        guard names.contains(where: { folded($0).contains(family) }) else { return false }
+      }
+      return true
+    }
+    return passing.count == 1 ? passing[0] : nil
+  }
+}
+
+/// How an OpenAlex record updates a library item. Pure, so it can be tested without a library.
+public enum OpenAlexMerge {
+  /// Returns the updated item, or nil when the record would change nothing.
+  ///
+  /// - Human-edited items keep all bibliographic fields; only the cached OpenAlex response
+  ///   is refreshed.
+  /// - An existing DOI is never replaced, and existing authors (with their ORCIDs) are
+  ///   never replaced; authors are filled only when the item has none.
+  /// - When the item was matched by DOI, OpenAlex's title, date and journal are trusted.
+  ///   When it was matched by title, those fields are only filled where empty.
+  public static func apply(_ record: OpenAlexWorkRecord, to original: LibraryItem) -> LibraryItem? {
+    var item = original
+    let matchedByDOI = !(original.doi ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+    if !item.humanEdited {
+      let titleEmpty = OpenAlexMatch.normalizedTitle(item.title).isEmpty || item.title == "Untitled"
+      if !record.title.isEmpty && (matchedByDOI || titleEmpty) { item.title = record.title }
+      if let date = record.publicationDate, matchedByDOI || item.publicationDate == nil { item.publicationDate = date }
+      if let year = record.year, matchedByDOI || item.year == nil { item.year = year }
+      if let journal = record.journal, !journal.isEmpty, matchedByDOI || item.journal.isEmpty { item.journal = journal }
+      if (item.doi ?? "").isEmpty, let doi = record.doi, !doi.isEmpty { item.doi = doi }
+      if item.authors.isEmpty && !record.authors.isEmpty {
+        item.setAuthors(record.authors.map { name in
+          let parts = name.split(separator: " ")
+          return Author(givenName: parts.dropLast().joined(separator: " "), familyName: parts.last.map(String.init) ?? String(name))
+        })
+      }
+      let mergedKeywords = Array(Set((item.keywords ?? []) + record.topics)).sorted()
+      if !mergedKeywords.isEmpty { item.keywords = mergedKeywords }
+    }
+    var snapshots = item.sourceMetadata ?? []
+    let previous = snapshots.first { $0.source == "OpenAlex" }?.payload
+    if previous != record.rawJSON {
+      snapshots.removeAll { $0.source == "OpenAlex" }
+      snapshots.append(MetadataSnapshot(source: "OpenAlex", format: "json", payload: record.rawJSON))
+      item.sourceMetadata = snapshots
+    }
+    guard item != original else { return nil }
+    item.provenance.append(Provenance("OpenAlex", matchedByDOI
+      ? "Exact DOI match; complete work response cached"
+      : "Exact title match corroborated by year/first author; complete work response cached"))
+    return item
   }
 }

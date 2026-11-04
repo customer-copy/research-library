@@ -90,34 +90,31 @@ public actor LibraryService: RetrievalService {
   }
   /// Returns the local records used by the homepage. This deliberately reads the indexed
   /// metadata only; PDF text is not loaded while the dashboard is opening.
-  public nonisolated func dashboardItems(limit: Int = 5000) async throws -> [LibraryItem] {
+  /// The search layer returns at most 500 rows per call, so this pages until `limit` items
+  /// (or the whole library) have been read.
+  public nonisolated func dashboardItems(limit: Int = 100_000) async throws -> [LibraryItem] {
     var filters = SearchFilters(); filters.sort = .dateAdded
-    return try await searchReader.search("", filters: filters, limit: limit, offset: 0).map(\.item)
-  }
-  public func mergeOpenAlex(_ record: OpenAlexWorkRecord, into id: UUID) throws {
-    guard var item = try database.item(id) else { return }
-    if !item.humanEdited {
-      if !record.title.isEmpty { item.title = record.title }
-      item.publicationDate = record.publicationDate ?? item.publicationDate
-      item.year = record.year ?? item.year
-      item.journal = record.journal ?? item.journal
-      item.doi = record.doi ?? item.doi
-      if !record.authors.isEmpty {
-        item.setAuthors(record.authors.map { name in
-          let parts = name.split(separator: " ")
-          return Author(givenName: parts.dropLast().joined(separator: " "), familyName: parts.last.map(String.init) ?? String(name))
-        })
-      }
-      let mergedKeywords = Array(Set((item.keywords ?? []) + record.topics)).sorted()
-      item.keywords = mergedKeywords.isEmpty ? item.keywords : mergedKeywords
+    let page = 500
+    var items: [LibraryItem] = []
+    while items.count < limit {
+      try Task.checkCancellation()
+      let want = min(page, limit - items.count)
+      let batch = try await searchReader.search("", filters: filters, limit: want, offset: items.count)
+      items.append(contentsOf: batch.map(\.item))
+      if batch.count < want { break }
     }
-    var snapshots = item.sourceMetadata ?? []
-    snapshots.removeAll { $0.source == "OpenAlex" }
-    snapshots.append(MetadataSnapshot(source: "OpenAlex", format: "json", payload: record.rawJSON))
-    item.sourceMetadata = snapshots
-    item.provenance.append(Provenance("OpenAlex", "Exact DOI match; complete work response cached"))
-    item.dateModified = Date()
-    try save(item)
+    return items
+  }
+  /// Merges an OpenAlex record using `OpenAlexMerge` rules. Returns false (and writes
+  /// nothing) when the record adds nothing new, so repeated syncs do not churn sidecars,
+  /// recovery copies or provenance.
+  @discardableResult
+  public func mergeOpenAlex(_ record: OpenAlexWorkRecord, into id: UUID) throws -> Bool {
+    guard let item = try database.item(id) else { return false }
+    guard var merged = OpenAlexMerge.apply(record, to: item) else { return false }
+    merged.dateModified = Date()
+    try save(merged)
+    return true
   }
   public nonisolated func matchingPages(_ query: String, itemID: UUID, limit: Int = 5,
     offset: Int = 0) async throws -> [RetrievalResult] {
